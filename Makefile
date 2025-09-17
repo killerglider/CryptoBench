@@ -2,39 +2,36 @@
 CC = gcc
 
 # Compiler flags
-# -Iinclude tells the compiler to look for header files in the 'include' directory
-# -Wall enables all common warnings
-# -O3 is a high level of optimization
-# -D_POSIX_C_SOURCE=199309L enables POSIX.1b functions like clock_gettime
-CFLAGS = -Iinclude -Wall -O3 -D_POSIX_C_SOURCE=199309L
+CFLAGS = -Iinclude -IC:/msys64/mingw64/include -Wall -O3 -D_POSIX_C_SOURCE=199309L
 
-# Linker flags
-# -lcrypto links the OpenSSL crypto library
-# -lm links the math library (good practice for timing functions)
-# -lrt links the real-time library (needed for clock_gettime on some systems)
-LDFLAGS = -lcrypto -lm -lrt
+# Linker flags (conditional: -lrt only on Linux)
+ifeq ($(OS),Windows_NT)
+    LDFLAGS = -LC:/msys64/mingw64/lib -lssl -lcrypto -lm
+else
+    LDFLAGS = -lssl -lcrypto -lm -lrt
+endif
 
-# Find all .c files in the src directory and its subdirectories
+# Source files
 SRCS = $(wildcard src/*.c src/aes/*.c src/ascon/*.c)
 
-# Replace the .c extension with .o to get the object file names
+# Object files
 OBJS = $(SRCS:.c=.o)
 
-# The final executable name
+# Target
 TARGET = benchmark
 
-# The default target, called when you just type 'make'
+# Default target
 all: $(TARGET)
 
-# Rule to link all the object files into the final executable
+# Link step
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-# Rule to compile a .c file into a .o file
+# Compile step
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Clean up build files
+# Clean
 clean:
 	rm -f $(OBJS) $(TARGET)
 
