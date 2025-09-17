@@ -3,7 +3,6 @@
 #include "../include/aes.h"
 #include <string.h>
 #include <stdint.h>
-#include <string.h>
 
 int aes_cbc_encrypt(
     const uint8_t *key, size_t key_len,

@@ -4,7 +4,6 @@
 #include "../include/aes.h"
 #include <string.h>
 #include <stdint.h>
-#include <string.h>
 
 // AES-128 S-box
 static const uint8_t sbox[256] = {
