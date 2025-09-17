@@ -1,4 +1,4 @@
-#include "../../include/ascon.h"
+#include "../include/ascon.h"
 #include <stdint.h>
 #include <stddef.h>
 

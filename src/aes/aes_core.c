@@ -1,9 +1,10 @@
 // src/aes/aes_core.c
 // Contains the core implementation of AES-128 block encryption and decryption.
 
-#include "../../include/aes.h"
+#include "../include/aes.h"
 #include <string.h>
 #include <stdint.h>
+#include <string.h>
 
 // AES-128 S-box
 static const uint8_t sbox[256] = {

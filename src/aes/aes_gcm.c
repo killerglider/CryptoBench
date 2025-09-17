@@ -2,10 +2,11 @@
 // need to add makefile instructions to link with -lssl -lcrypto
 // Example compile command: gcc -o aes_gcm aes_gcm.c -lssl -lcrypto
 
-#include "../../include/aes.h"
+#include "../include/aes.h"
 #include <openssl/evp.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 int aes_gcm_encrypt(
     const uint8_t *key, size_t key_len,

@@ -1,7 +1,7 @@
 // src/ascon/ascon_core.c
 // Contains the core, parameterized implementation of the ASCON permutation and AEAD logic.
 
-#include "../../include/ascon.h"
+#include "../include/ascon.h"
 #include <string.h>
 #include <stdint.h>
 
