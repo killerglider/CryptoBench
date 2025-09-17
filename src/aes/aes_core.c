@@ -1,11 +1,11 @@
 // src/aes/aes_core.c
-// Contains the core implementation of AES-128 block operations.
+// Contains the core implementation of AES-128 block encryption and decryption.
 
 #include "../../include/aes.h"
 #include <string.h>
 #include <stdint.h>
 
-// AES-128 S-box and inverse S-box
+// AES-128 S-box
 static const uint8_t sbox[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -57,6 +57,7 @@ void inv_shift_rows(uint8_t state[4][4]);
 void mix_columns(uint8_t state[4][4]);
 void inv_mix_columns(uint8_t state[4][4]);
 void add_round_key(uint8_t state[4][4], const uint8_t* round_key);
+uint8_t gmul(uint8_t a, uint8_t b);
 
 // Key expansion
 void key_expansion(const uint8_t* key, uint8_t* round_keys) {
@@ -64,76 +65,71 @@ void key_expansion(const uint8_t* key, uint8_t* round_keys) {
     for (int i = 1; i < 11; ++i) {
         uint8_t* prev_key = round_keys + (i - 1) * 16;
         uint8_t* curr_key = round_keys + i * 16;
-        // Copy previous key
-        memcpy(curr_key, prev_key, 16);
-        // Perform transformations
         uint8_t temp[4];
-        // Rotate
+        
+        // RotWord
         temp[0] = prev_key[13];
         temp[1] = prev_key[14];
         temp[2] = prev_key[15];
         temp[3] = prev_key[12];
-        // SubBytes
+        
+        // SubWord
         for (int j = 0; j < 4; ++j) {
             temp[j] = sbox[temp[j]];
         }
+        
         // XOR with Rcon
         temp[0] ^= rcon[i];
+        
         // XOR with the first word of the previous key
         for (int j = 0; j < 4; ++j) {
-            curr_key[j] ^= temp[j];
+            curr_key[j] = prev_key[j] ^ temp[j];
         }
+        
         // XOR with the rest of the key
         for (int j = 4; j < 16; ++j) {
-            curr_key[j] ^= curr_key[j - 4];
+            curr_key[j] = prev_key[j] ^ curr_key[j - 4];
         }
     }
 }
 
-// AES encryption functions (same as before)
-void sub_bytes(uint8_t state[4][4]) { /* ... */ }
-void shift_rows(uint8_t state[4][4]) { /* ... */ }
-void mix_columns(uint8_t state[4][4]) { /* ... */ }
-void add_round_key(uint8_t state[4][4], const uint8_t* round_key) { /* ... */ }
-
-void aes_128_encrypt_block(const uint8_t *key, const uint8_t *input, uint8_t *output) {
-    uint8_t round_keys[176];
-    key_expansion(key, round_keys);
-
-    uint8_t state[4][4];
+void sub_bytes(uint8_t state[4][4]) {
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
-            state[j][i] = input[i * 4 + j];
-        }
-    }
-
-    add_round_key(state, round_keys);
-
-    for (int i = 1; i < 10; ++i) {
-        sub_bytes(state);
-        shift_rows(state);
-        mix_columns(state);
-        add_round_key(state, round_keys + i * 16);
-    }
-
-    sub_bytes(state);
-    shift_rows(state);
-    add_round_key(state, round_keys + 160);
-
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            output[i * 4 + j] = state[j][i];
+            state[i][j] = sbox[state[i][j]];
         }
     }
 }
 
-// New AES decryption functions
 void inv_sub_bytes(uint8_t state[4][4]) {
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
             state[i][j] = inv_sbox[state[i][j]];
         }
     }
+}
+
+void shift_rows(uint8_t state[4][4]) {
+    uint8_t temp;
+    // Row 1
+    temp = state[1][0];
+    state[1][0] = state[1][1];
+    state[1][1] = state[1][2];
+    state[1][2] = state[1][3];
+    state[1][3] = temp;
+    // Row 2
+    temp = state[2][0];
+    state[2][0] = state[2][2];
+    state[2][2] = temp;
+    temp = state[2][1];
+    state[2][1] = state[2][3];
+    state[2][3] = temp;
+    // Row 3
+    temp = state[3][0];
+    state[3][0] = state[3][3];
+    state[3][3] = state[3][2];
+    state[3][2] = state[3][1];
+    state[3][1] = temp;
 }
 
 void inv_shift_rows(uint8_t state[4][4]) {
@@ -144,7 +140,7 @@ void inv_shift_rows(uint8_t state[4][4]) {
     state[1][2] = state[1][1];
     state[1][1] = state[1][0];
     state[1][0] = temp;
-    // Row 2 (same as shift_rows)
+    // Row 2
     temp = state[2][0];
     state[2][0] = state[2][2];
     state[2][2] = temp;
@@ -176,6 +172,20 @@ uint8_t gmul(uint8_t a, uint8_t b) {
     return p;
 }
 
+void mix_columns(uint8_t state[4][4]) {
+    uint8_t temp[4];
+    for (int i = 0; i < 4; ++i) {
+        temp[0] = gmul(state[0][i], 2) ^ gmul(state[1][i], 3) ^ state[2][i] ^ state[3][i];
+        temp[1] = state[0][i] ^ gmul(state[1][i], 2) ^ gmul(state[2][i], 3) ^ state[3][i];
+        temp[2] = state[0][i] ^ state[1][i] ^ gmul(state[2][i], 2) ^ gmul(state[3][i], 3);
+        temp[3] = gmul(state[0][i], 3) ^ state[1][i] ^ state[2][i] ^ gmul(state[3][i], 2);
+        state[0][i] = temp[0];
+        state[1][i] = temp[1];
+        state[2][i] = temp[2];
+        state[3][i] = temp[3];
+    }
+}
+
 void inv_mix_columns(uint8_t state[4][4]) {
     uint8_t temp[4];
     for (int i = 0; i < 4; ++i) {
@@ -187,6 +197,45 @@ void inv_mix_columns(uint8_t state[4][4]) {
         state[1][i] = temp[1];
         state[2][i] = temp[2];
         state[3][i] = temp[3];
+    }
+}
+
+void add_round_key(uint8_t state[4][4], const uint8_t* round_key) {
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            state[j][i] ^= round_key[i * 4 + j];
+        }
+    }
+}
+
+void aes_128_encrypt_block(const uint8_t *key, const uint8_t *input, uint8_t *output) {
+    uint8_t round_keys[176];
+    key_expansion(key, round_keys);
+
+    uint8_t state[4][4];
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            state[j][i] = input[i * 4 + j];
+        }
+    }
+
+    add_round_key(state, round_keys);
+
+    for (int i = 1; i < 10; ++i) {
+        sub_bytes(state);
+        shift_rows(state);
+        mix_columns(state);
+        add_round_key(state, round_keys + i * 16);
+    }
+
+    sub_bytes(state);
+    shift_rows(state);
+    add_round_key(state, round_keys + 160);
+
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            output[i * 4 + j] = state[j][i];
+        }
     }
 }
 
