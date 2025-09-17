@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include <sys/time.h>  /* Using gettimeofday instead of clock_gettime */
 #include <stdint.h>
 
 // Include your project's AES and ASCON headers
@@ -17,11 +17,11 @@ const size_t MESSAGE_SIZES[] = {
 };
 const int NUM_MESSAGE_SIZES = sizeof(MESSAGE_SIZES) / sizeof(MESSAGE_SIZES[0]);
 
-// Helper function to get the current time in nanoseconds
+// Helper function to get the current time in nanoseconds using gettimeofday
 uint64_t get_time_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000 + (uint64_t)ts.tv_nsec;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000000 + (uint64_t)tv.tv_usec * 1000;
 }
 
 // Function to benchmark a specific encryption/decryption pair
@@ -41,6 +41,12 @@ void benchmark_algorithm(const char* name,
     uint8_t* key = malloc(key_len); 
     uint8_t* nonce = malloc(nonce_len);
     uint8_t* tag = malloc(16);
+
+    // Check for allocation failures
+    if (!plaintext || !ciphertext || !decrypted_plaintext || !key || !nonce || !tag) {
+        printf("Memory allocation failed!\n");
+        return;
+    }
 
     // Fill buffers with some dummy data
     for (size_t i = 0; i < max_size; ++i) plaintext[i] = (uint8_t)(i & 0xff);

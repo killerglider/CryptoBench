@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#define ASCON80pq_IV        0xa0400c06ULL 
+#define ASCON80pq_IV        0xa0400c0600000000ULL 
 #define ASCON80pq_KEY_LEN   20
 #define ASCON80pq_NONCE_LEN 16
 #define ASCON80pq_TAG_LEN   16

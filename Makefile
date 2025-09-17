@@ -5,12 +5,14 @@ CC = gcc
 # -Iinclude tells the compiler to look for header files in the 'include' directory
 # -Wall enables all common warnings
 # -O3 is a high level of optimization
-CFLAGS = -Iinclude -Wall -O3
+# -D_POSIX_C_SOURCE=199309L enables POSIX.1b functions like clock_gettime
+CFLAGS = -Iinclude -Wall -O3 -D_POSIX_C_SOURCE=199309L
 
 # Linker flags
 # -lcrypto links the OpenSSL crypto library
 # -lm links the math library (good practice for timing functions)
-LDFLAGS = -lcrypto -lm
+# -lrt links the real-time library (needed for clock_gettime on some systems)
+LDFLAGS = -lcrypto -lm -lrt
 
 # Find all .c files in the src directory and its subdirectories
 SRCS = $(wildcard src/*.c src/aes/*.c src/ascon/*.c)
