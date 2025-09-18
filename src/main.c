@@ -4,7 +4,7 @@
 #include <sys/time.h>
 #include <stdint.h>
 
-// Include project's AES and ASCON headers
+// Include your project's AES and ASCON headers
 #include "include/aes.h"
 #include "include/ascon.h"
 
@@ -28,15 +28,15 @@ uint64_t get_time_ns() {
     return (uint64_t)tv.tv_sec * 1000000000 + (uint64_t)tv.tv_usec * 1000;
 }
 
-// Unified function to benchmark both latency and throughput with dynamic iterations
+// Unified function to benchmark performance metrics including memory footprint
 void benchmark_algorithm(const char* name,
                          size_t key_len,
                          size_t nonce_len,
                          FILE* csv_file) {
 
     printf("--- Benchmarking Performance for: %s ---\n", name);
-    printf("%-12s | %-18s | %-18s | %-18s | %-18s\n", "Msg Size", "Encrypt (ns/op)", "Encrypt (MB/s)", "Decrypt (ns/op)", "Decrypt (MB/s)");
-    printf("----------------------------------------------------------------------------------------------------\n");
+    printf("%-12s | %-18s | %-18s | %-18s | %-18s | %-15s\n", "Msg Size", "Encrypt (ns/op)", "Encrypt (MB/s)", "Decrypt (ns/op)", "Decrypt (MB/s)", "Memory (KB)");
+    printf("-------------------------------------------------------------------------------------------------------------------------\n");
 
     const size_t max_size = MESSAGE_SIZES[NUM_MESSAGE_SIZES - 1];
     uint8_t* plaintext = malloc(max_size);
@@ -105,19 +105,29 @@ void benchmark_algorithm(const char* name,
         end_time = get_time_ns();
         elapsed_decrypt = end_time - start_time;
 
-        // Calculate metrics
+        // --- Calculate Metrics ---
         double avg_encrypt_ns = (double)elapsed_encrypt / iterations;
         double encrypt_mb_s = total_data_mb / ((double)elapsed_encrypt / 1e9);
         double avg_decrypt_ns = (double)elapsed_decrypt / iterations;
         double decrypt_mb_s = total_data_mb / ((double)elapsed_decrypt / 1e9);
 
+        // Calculate Memory Footprint for this message size
+        size_t total_allocated_bytes = 0;
+        total_allocated_bytes += current_size;         // plaintext buffer
+        total_allocated_bytes += (current_size + 16);  // ciphertext buffer
+        total_allocated_bytes += current_size;         // decrypted_plaintext buffer
+        total_allocated_bytes += key_len;              // key buffer
+        total_allocated_bytes += nonce_len;            // nonce buffer
+        total_allocated_bytes += 16;                   // tag buffer
+        double memory_footprint_kb = (double)total_allocated_bytes / 1024.0;
+
         // Print results to console
-        printf("%-12zu | %-18.2f | %-18.2f | %-18.2f | %-18.2f\n",
-               current_size, avg_encrypt_ns, encrypt_mb_s, avg_decrypt_ns, decrypt_mb_s);
+        printf("%-12zu | %-18.2f | %-18.2f | %-18.2f | %-18.2f | %-15.2f\n",
+               current_size, avg_encrypt_ns, encrypt_mb_s, avg_decrypt_ns, decrypt_mb_s, memory_footprint_kb);
 
         // Write results to CSV file
-        fprintf(csv_file, "%s,%zu,%.2f,%.2f,%.2f,%.2f\n",
-                name, current_size, avg_encrypt_ns, encrypt_mb_s, avg_decrypt_ns, decrypt_mb_s);
+        fprintf(csv_file, "%s,%zu,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                name, current_size, avg_encrypt_ns, encrypt_mb_s, avg_decrypt_ns, decrypt_mb_s, memory_footprint_kb);
     }
 
     // Free allocated memory
@@ -138,11 +148,11 @@ int main() {
     }
 
     // Write CSV header
-    fprintf(results_file, "Algorithm,Message Size (bytes),Encrypt Latency (ns/op),Encrypt Throughput (MB/s),Decrypt Latency (ns/op),Decrypt Throughput (MB/s)\n");
+    fprintf(results_file, "Algorithm,Message Size (bytes),Encrypt Latency (ns/op),Encrypt Throughput (MB/s),Decrypt Latency (ns/op),Decrypt Throughput (MB/s),Memory Footprint (KB)\n");
 
-    printf("=================================================================================================\n");
-    printf("                              Cryptographic Algorithm Performance Benchmark\n");
-    printf("=================================================================================================\n");
+    printf("=========================================================================================================================\n");
+    printf("                                      Cryptographic Algorithm Performance Benchmark\n");
+    printf("=========================================================================================================================\n");
     printf("Iterations: %d (< 64KB messages), %d (>= 64KB messages)\n\n", DEFAULT_ITERATIONS, LARGE_MSG_ITERATIONS);
 
     benchmark_algorithm("AES-128-GCM", 16, 12, results_file);
