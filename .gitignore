@@ -1,4 +1,7 @@
 .vscode
+.vs
+*.o
+benchmark.exe
 LICENSE
 README.md
 Proposal_Major_Project.pdf
