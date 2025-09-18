@@ -22,7 +22,7 @@
 
 // The different message sizes to be tested
 const size_t MESSAGE_SIZES[] = {
-    16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576
+    16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304
 };
 const int NUM_MESSAGE_SIZES = sizeof(MESSAGE_SIZES) / sizeof(MESSAGE_SIZES[0]);
 
