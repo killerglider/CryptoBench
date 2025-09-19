@@ -70,7 +70,7 @@ To ensure comprehensive results, benchmarks are conducted across multiple modern
     * **ARMv8 (AArch64):** Representing mobile and embedded systems.
 * **Operating Systems & Compilers:**
     * Linux (Ubuntu 22.04 LTS) with GCC/Clang.
-    * Windows 11 with MSVC.
+    * Windows 11 with GCC (MSYS2 MinGW-W64 and OpenSSL).
     * macOS with Clang (on ARMv8).
 
 ### Layered Code Optimization
