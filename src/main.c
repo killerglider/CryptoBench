@@ -1,249 +1,299 @@
+/*
+ * main.c
+ *
+ * CryptoBench — Level-3 Benchmark Harness
+ *   - AES-128 AES-NI (CTR, CBC)
+ *   - AES-128-GCM (aes_gcm.c wrappers)
+ *   - Ascon-128, Ascon-128a, Ascon-80pq (SIMD permutation AEAD)
+ *
+ * Benchmarks sizes: 16 -> 64 -> 256 -> ... -> 4 MB
+ * Iterations: 10000 for <= 64KB, 1000 for >64KB
+ * Results -> benchmark_results.csv (same format as Level-2)
+ */
+
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
-#include <stdint.h>
+#include <time.h>
+#include <x86intrin.h>   // __rdtsc
+#include <errno.h>
 
-// For __rdtsc() on x86_64
-#if defined(__x86_64__) || defined(_M_X64)
-#include <x86intrin.h>
+#ifdef _WIN32
+#include <malloc.h>  // for _aligned_malloc / _aligned_free
 #endif
 
-// For mach_absolute_time() and hw.tbfrequency on Apple Silicon
-#if defined(__aarch64__) && defined(__APPLE__)
-#include <mach/mach_time.h>
-#include <sys/sysctl.h>
-
-// Get the timebase frequency for mach_absolute_time()
-static inline uint64_t get_tb_hz() {
-    uint64_t freq = 0;
-    size_t size = sizeof(freq);
-    if (sysctlbyname("hw.tbfrequency", &freq, &size, NULL, 0) == 0 && freq > 0) {
-        return freq; // ticks per second
-    }
-    return 0;
-}
-#endif
-
-// Include project's AES and ASCON headers
-#include "include/aes.h"
+#include "include/aes_ni.h"
 #include "include/ascon.h"
 
-// Iteration settings
-#define DEFAULT_ITERATIONS 10000
-#define LARGE_MSG_ITERATIONS 1000
-#define LARGE_MSG_THRESHOLD 65536 // 64 KB
+/* AES-GCM wrappers from aes_gcm.c */
+extern int aes_gcm_encrypt(const uint8_t *key, size_t key_len,
+                           const uint8_t *iv, size_t iv_len,
+                           const uint8_t *pt, size_t pt_len,
+                           const uint8_t *aad, size_t aad_len,
+                           uint8_t *ct, uint8_t *tag, size_t tag_len);
 
-// Message sizes to benchmark
-const size_t MESSAGE_SIZES[] = {
-    16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304
-};
-const int NUM_MESSAGE_SIZES = sizeof(MESSAGE_SIZES) / sizeof(MESSAGE_SIZES[0]);
+extern int aes_gcm_decrypt(const uint8_t *key, size_t key_len,
+                           const uint8_t *iv, size_t iv_len,
+                           const uint8_t *ct, size_t ct_len,
+                           const uint8_t *aad, size_t aad_len,
+                           const uint8_t *tag, size_t tag_len,
+                           uint8_t *pt);
 
-// Wall-clock timing
-uint64_t get_time_ns() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000000000 + (uint64_t)tv.tv_usec * 1000;
-}
+#define MIN_SIZE 16
+#define MAX_SIZE (4 * 1024 * 1024) /* 4 MB */
+#define ALIGN 32
 
-// Cycle/tick counter
-static inline uint64_t get_cycles_ll() {
-#if defined(__x86_64__) || defined(_M_X64)
-    return __rdtsc();
-#elif defined(__aarch64__) && defined(__APPLE__)
-    return mach_absolute_time(); // returns ticks
+/* portable aligned allocation */
+static void* portable_aligned_alloc(size_t alignment, size_t size) {
+#ifdef _WIN32
+    return _aligned_malloc(size, alignment);
 #else
-    return 0;
+    void *ptr = NULL;
+    if (posix_memalign(&ptr, alignment, size) != 0) {
+        return NULL;
+    }
+    return ptr;
 #endif
 }
 
-// Unified benchmark function
-void benchmark_algorithm(const char* name,
-                         size_t key_len,
-                         size_t nonce_len,
-                         FILE* csv_file) {
-
-    printf("--- Benchmarking Performance for: %s ---\n", name);
-
-#if defined(__x86_64__) || defined(_M_X64)
-    printf("%-12s | %-15s | %-15s | %-15s | %-15s | %-12s | %-14s | %-14s | %-10s | %-10s\n",
-           "Msg Size", "Enc (ns/op)", "Enc (MB/s)", "Dec (ns/op)",
-           "Dec (MB/s)", "Mem (KB)", "Enc (ns/B)", "Dec (ns/B)", "Enc CPB", "Dec CPB");
-    printf("----------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
-#elif defined(__aarch64__) && defined(__APPLE__)
-    printf("%-12s | %-15s | %-15s | %-15s | %-15s | %-12s | %-14s | %-14s | %-10s | %-10s\n",
-           "Msg Size", "Enc (ns/op)", "Enc (MB/s)", "Dec (ns/op)",
-           "Dec (MB/s)", "Mem (KB)", "Enc (ns/B)", "Dec (ns/B)", "Enc CPB*", "Dec CPB*");
-    printf("----------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
+static void portable_aligned_free(void *ptr) {
+#ifdef _WIN32
+    _aligned_free(ptr);
+#else
+    free(ptr);
 #endif
-
-    const size_t max_size = MESSAGE_SIZES[NUM_MESSAGE_SIZES - 1];
-    uint8_t* plaintext = malloc(max_size);
-    uint8_t* ciphertext = malloc(max_size + 16); // Accommodate tag
-    uint8_t* decrypted_plaintext = malloc(max_size);
-    uint8_t* key = malloc(key_len);
-    uint8_t* nonce = malloc(nonce_len);
-    uint8_t* tag = malloc(16);
-
-    if (!plaintext || !ciphertext || !decrypted_plaintext || !key || !nonce || !tag) {
-        printf("Memory allocation failed!\n");
-        return;
-    }
-
-    // Pre-fill buffers with dummy data
-    for (size_t i = 0; i < max_size; ++i) plaintext[i] = (uint8_t)(i & 0xff);
-    for (size_t i = 0; i < key_len; ++i) key[i] = (uint8_t)(i & 0xff);
-    for (size_t i = 0; i < nonce_len; ++i) nonce[i] = (uint8_t)(i & 0xff);
-
-#if defined(__aarch64__) && defined(__APPLE__)
-    uint64_t tb_hz = get_tb_hz();
-    if (tb_hz > 0) {
-        printf("[INFO] Using hw.tbfrequency = %llu Hz (~%.2f ns per tick)\n",
-               (unsigned long long)tb_hz, 1e9 / (double)tb_hz);
-    } else {
-        printf("[WARN] Could not fetch hw.tbfrequency — CPB* will be 0.\n");
-    }
-#endif
-
-    for (int i = 0; i < NUM_MESSAGE_SIZES; ++i) {
-        size_t current_size = MESSAGE_SIZES[i];
-        uint64_t start_time, end_time, elapsed_encrypt, elapsed_decrypt;
-        uint64_t start_cycles, end_cycles, elapsed_encrypt_cycles, elapsed_decrypt_cycles;
-
-        int iterations = (current_size < LARGE_MSG_THRESHOLD) ? DEFAULT_ITERATIONS : LARGE_MSG_ITERATIONS;
-        
-        double total_data_mb = (double)(iterations * current_size) / (1024 * 1024);
-        unsigned long long total_data_bytes = (unsigned long long)iterations * current_size;
-
-        // --- Encryption ---
-        start_time = get_time_ns();
-        start_cycles = get_cycles_ll();
-        for (int j = 0; j < iterations; ++j) {
-            if (strcmp(name, "AES-128-GCM") == 0) {
-                aes_gcm_encrypt(key, 16, nonce, 12, plaintext, current_size, NULL, 0, ciphertext, tag, 16);
-            } else if (strcmp(name, "AES-128-CBC") == 0) {
-                aes_cbc_encrypt(key, 16, nonce, 16, plaintext, current_size, ciphertext);
-            } else if (strcmp(name, "AES-128-CTR") == 0) {
-                aes_ctr_crypt(key, 16, nonce, 16, plaintext, current_size, ciphertext);
-            } else if (strcmp(name, "ASCON-128") == 0) {
-                ascon_128_encrypt(key, 16, nonce, 16, plaintext, current_size, NULL, 0, ciphertext, tag, 16);
-            } else if (strcmp(name, "ASCON-128a") == 0) {
-                ascon_128a_encrypt(key, 16, nonce, 16, plaintext, current_size, NULL, 0, ciphertext, tag, 16);
-            } else if (strcmp(name, "ASCON-80pq") == 0) {
-                ascon_80pq_encrypt(key, 20, nonce, 16, plaintext, current_size, NULL, 0, ciphertext, tag, 16);
-            }
-        }
-        end_cycles = get_cycles_ll();
-        end_time = get_time_ns();
-        elapsed_encrypt = end_time - start_time;
-        elapsed_encrypt_cycles = end_cycles - start_cycles;
-
-        // --- Decryption ---
-        start_time = get_time_ns();
-        start_cycles = get_cycles_ll();
-        for (int j = 0; j < iterations; ++j) {
-            if (strcmp(name, "AES-128-GCM") == 0) {
-                aes_gcm_decrypt(key, 16, nonce, 12, ciphertext, current_size, NULL, 0, tag, 16, decrypted_plaintext);
-            } else if (strcmp(name, "AES-128-CBC") == 0) {
-                aes_cbc_decrypt(key, 16, nonce, 16, ciphertext, current_size, decrypted_plaintext);
-            } else if (strcmp(name, "AES-128-CTR") == 0) {
-                aes_ctr_crypt(key, 16, nonce, 16, ciphertext, current_size, decrypted_plaintext);
-            } else if (strcmp(name, "ASCON-128") == 0) {
-                ascon_128_decrypt(key, 16, nonce, 16, ciphertext, current_size, NULL, 0, tag, 16, decrypted_plaintext);
-            } else if (strcmp(name, "ASCON-128a") == 0) {
-                ascon_128a_decrypt(key, 16, nonce, 16, ciphertext, current_size, NULL, 0, tag, 16, decrypted_plaintext);
-            } else if (strcmp(name, "ASCON-80pq") == 0) {
-                ascon_80pq_decrypt(key, 20, nonce, 16, ciphertext, current_size, NULL, 0, tag, 16, decrypted_plaintext);
-            }
-        }
-        end_cycles = get_cycles_ll();
-        end_time = get_time_ns();
-        elapsed_decrypt = end_time - start_time;
-        elapsed_decrypt_cycles = end_cycles - start_cycles;
-
-        // --- Metrics ---
-        double avg_encrypt_ns = (double)elapsed_encrypt / iterations;
-        double encrypt_mb_s = total_data_mb / ((double)elapsed_encrypt / 1e9);
-        double avg_decrypt_ns = (double)elapsed_decrypt / iterations;
-        double decrypt_mb_s = total_data_mb / ((double)elapsed_decrypt / 1e9);
-
-        double ns_per_byte_enc = (double)elapsed_encrypt / (double)total_data_bytes;
-        double ns_per_byte_dec = (double)elapsed_decrypt / (double)total_data_bytes;
-
-        double encrypt_cpb = 0.0, decrypt_cpb = 0.0;
-
-#if defined(__x86_64__) || defined(_M_X64)
-        encrypt_cpb = total_data_bytes > 0 ? (double)elapsed_encrypt_cycles / (double)total_data_bytes : 0;
-        decrypt_cpb = total_data_bytes > 0 ? (double)elapsed_decrypt_cycles / (double)total_data_bytes : 0;
-#elif defined(__aarch64__) && defined(__APPLE__)
-        encrypt_cpb = ns_per_byte_enc; // ticks per byte
-        decrypt_cpb = ns_per_byte_dec;
-#endif
-
-        size_t total_allocated_bytes = current_size + (current_size + 16) + current_size + key_len + nonce_len + 16;
-        double memory_footprint_kb = (double)total_allocated_bytes / 1024.0;
-
-        // Print
-#if defined(__x86_64__) || defined(_M_X64)
-        printf("%-12zu | %-15.2f | %-15.2f | %-15.2f | %-15.2f | %-12.2f | %10.4f | %10.4f | %10.2f | %10.2f\n",
-               current_size, avg_encrypt_ns, encrypt_mb_s, avg_decrypt_ns, decrypt_mb_s,
-               memory_footprint_kb, ns_per_byte_enc, ns_per_byte_dec, encrypt_cpb, decrypt_cpb);
-#elif defined(__aarch64__) && defined(__APPLE__)
-        printf("%-12zu | %-15.2f | %-15.2f | %-15.2f | %-15.2f | %-12.2f | %10.4f | %10.4f | %10.2f | %10.2f\n",
-               current_size, avg_encrypt_ns, encrypt_mb_s, avg_decrypt_ns, decrypt_mb_s,
-               memory_footprint_kb, ns_per_byte_enc, ns_per_byte_dec, encrypt_cpb, decrypt_cpb);
-#endif
-
-        // CSV
-#if defined(__x86_64__) || defined(_M_X64)
-        fprintf(csv_file, "%s,%zu,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.2f,%.2f\n",
-                name, current_size, avg_encrypt_ns, encrypt_mb_s, avg_decrypt_ns, decrypt_mb_s,
-                memory_footprint_kb, ns_per_byte_enc, ns_per_byte_dec, encrypt_cpb, decrypt_cpb);
-#elif defined(__aarch64__) && defined(__APPLE__)
-        fprintf(csv_file, "%s,%zu,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.2f,%.2f\n",
-                name, current_size, avg_encrypt_ns, encrypt_mb_s, avg_decrypt_ns, decrypt_mb_s,
-                memory_footprint_kb, ns_per_byte_enc, ns_per_byte_dec, encrypt_cpb, decrypt_cpb);
-#endif
-    }
-
-    // Cleanup
-    free(plaintext);
-    free(ciphertext);
-    free(decrypted_plaintext);
-    free(key);
-    free(nonce);
-    free(tag);
-    printf("\n");
 }
 
-int main() {
-    FILE *results_file = fopen("benchmark_results.csv", "w");
-    if (results_file == NULL) {
-        printf("Error: Could not open benchmark_results.csv for writing.\n");
+/* helpers */
+static inline uint64_t rdtsc(void) { return __rdtsc(); }
+
+static inline uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+/* run func with iterations, return avg ns/op and cycles/op */
+static void run_bench(void (*func)(void*), void *arg, size_t bytes,
+                      int iterations, double *avg_ns, double *avg_cycles) {
+    double total_ns = 0.0, total_cycles = 0.0;
+    for (int i = 0; i < iterations; i++) {
+        uint64_t c0 = rdtsc();
+        uint64_t n0 = now_ns();
+
+        func(arg);
+
+        uint64_t n1 = now_ns();
+        uint64_t c1 = rdtsc();
+
+        total_ns += (double)(n1 - n0);
+        total_cycles += (double)(c1 - c0);
+    }
+    *avg_ns = total_ns / (double)iterations;
+    *avg_cycles = total_cycles / (double)iterations;
+}
+
+/* AES-CTR benchmark struct */
+typedef struct {
+    aes128ni_ctx ctx;
+    const uint8_t *in;
+    uint8_t *out;
+    size_t len;
+    uint8_t iv[16];
+} aes_bench_t;
+
+static void aes_ctr_call(void *p) {
+    aes_bench_t *a = (aes_bench_t*)p;
+    aes128ni_ctr_crypt(&a->ctx, a->iv, a->in, a->out, a->len);
+}
+
+static void aes_cbc_enc_call(void *p) {
+    aes_bench_t *a = (aes_bench_t*)p;
+    aes128ni_cbc_encrypt(&a->ctx, a->iv, a->in, a->out, a->len);
+}
+
+static void aes_cbc_dec_call(void *p) {
+    aes_bench_t *a = (aes_bench_t*)p;
+    aes128ni_cbc_decrypt(&a->ctx, a->iv, a->in, a->out, a->len);
+}
+
+/* AES-GCM benchmark struct */
+typedef struct {
+    const uint8_t *key;
+    const uint8_t *in;
+    uint8_t *out;
+    size_t len;
+    const uint8_t *iv;
+    uint8_t *tag; size_t tag_len;
+} aes_gcm_bench_t;
+
+static void aes_gcm_enc_call(void *p) {
+    aes_gcm_bench_t *a = (aes_gcm_bench_t*)p;
+    aes_gcm_encrypt(a->key, 16, a->iv, 12, a->in, a->len,
+                    NULL, 0, a->out, a->tag, a->tag_len);
+}
+
+static void aes_gcm_dec_call(void *p) {
+    aes_gcm_bench_t *a = (aes_gcm_bench_t*)p;
+    aes_gcm_decrypt(a->key, 16, a->iv, 12, a->out, a->len,
+                    NULL, 0, a->tag, a->tag_len, (uint8_t*)a->in);
+}
+
+/* ASCON benchmark struct */
+typedef struct {
+    const uint8_t *key;
+    const uint8_t *nonce;
+    const uint8_t *ad; size_t ad_len;
+    const uint8_t *in;
+    uint8_t *out;
+    size_t len;
+    uint8_t *tag;
+} ascon_bench_t;
+
+static void ascon128_enc_call(void *p) {
+    ascon_bench_t *a = (ascon_bench_t*)p;
+    ascon_128_encrypt(a->key, 16, a->nonce, 16, a->ad, a->ad_len,
+                      a->in, a->len, a->out, a->tag, 16);
+}
+static void ascon128_dec_call(void *p) {
+    ascon_bench_t *a = (ascon_bench_t*)p;
+    ascon_128_decrypt(a->key, 16, a->nonce, 16, a->ad, a->ad_len,
+                      a->in, a->len, a->tag, 16, a->out);
+}
+
+static void ascon128a_enc_call(void *p) {
+    ascon_bench_t *a = (ascon_bench_t*)p;
+    ascon_128a_encrypt(a->key, 16, a->nonce, 16, a->ad, a->ad_len,
+                       a->in, a->len, a->out, a->tag, 16);
+}
+static void ascon128a_dec_call(void *p) {
+    ascon_bench_t *a = (ascon_bench_t*)p;
+    ascon_128a_decrypt(a->key, 16, a->nonce, 16, a->ad, a->ad_len,
+                       a->in, a->len, a->tag, 16, a->out);
+}
+
+static void ascon80pq_enc_call(void *p) {
+    ascon_bench_t *a = (ascon_bench_t*)p;
+    ascon_80pq_encrypt(a->key, 20, a->nonce, 16, a->ad, a->ad_len,
+                       a->in, a->len, a->out, a->tag, 16);
+}
+static void ascon80pq_dec_call(void *p) {
+    ascon_bench_t *a = (ascon_bench_t*)p;
+    ascon_80pq_decrypt(a->key, 20, a->nonce, 16, a->ad, a->ad_len,
+                       a->in, a->len, a->tag, 16, a->out);
+}
+
+/* write CSV row */
+static void write_csv(FILE *csv, const char *alg, size_t size,
+                      double enc_ns, double enc_cycles,
+                      double dec_ns, double dec_cycles) {
+    double enc_throughput = ((double)size / 1e6) / (enc_ns / 1e9);
+    double dec_throughput = ((double)size / 1e6) / (dec_ns / 1e9);
+    double mem_kb = (double)size / 1024.0;
+    double enc_ns_byte = enc_ns / (double)size;
+    double dec_ns_byte = dec_ns / (double)size;
+    double enc_cpb = enc_cycles / (double)size;
+    double dec_cpb = dec_cycles / (double)size;
+
+    fprintf(csv, "%s,%zu,%.4f,%.2f,%.4f,%.2f,%.2f,%.6f,%.6f,%.4f,%.4f\n",
+            alg, size,
+            enc_ns, enc_throughput,
+            dec_ns, dec_throughput,
+            mem_kb,
+            enc_ns_byte, dec_ns_byte,
+            enc_cpb, dec_cpb);
+}
+
+/* --- main --- */
+int main(void) {
+    FILE *csv = fopen("benchmark_results.csv", "w");
+    if (!csv) { perror("fopen"); return 1; }
+    fprintf(csv, "Algorithm,Message Size (bytes),Encrypt Latency (ns/op),Encrypt Throughput (MB/s),"
+                 "Decrypt Latency (ns/op),Decrypt Throughput (MB/s),Memory Footprint (KB),"
+                 "Encrypt (ns/byte),Decrypt (ns/byte),Encrypt CPB,Decrypt CPB\n");
+
+    uint8_t *buf_in, *buf_mid, *buf_out, *tag;
+    buf_in  = portable_aligned_alloc(ALIGN, MAX_SIZE);
+    buf_mid = portable_aligned_alloc(ALIGN, MAX_SIZE);
+    buf_out = portable_aligned_alloc(ALIGN, MAX_SIZE);
+    tag     = portable_aligned_alloc(ALIGN, 16);
+
+    if (!buf_in || !buf_mid || !buf_out || !tag) {
+        perror("aligned_alloc");
         return 1;
     }
+    memset(buf_in, 0xA5, MAX_SIZE);
 
-#if defined(__x86_64__) || defined(_M_X64)
-    fprintf(results_file, "Algorithm,Message Size (bytes),Encrypt Latency (ns/op),Encrypt Throughput (MB/s),Decrypt Latency (ns/op),Decrypt Throughput (MB/s),Memory Footprint (KB),Encrypt (ns/byte),Decrypt (ns/byte),Encrypt CPB,Decrypt CPB\n");
-#elif defined(__aarch64__) && defined(__APPLE__)
-    fprintf(results_file, "Algorithm,Message Size (bytes),Encrypt Latency (ns/op),Encrypt Throughput (MB/s),Decrypt Latency (ns/op),Decrypt Throughput (MB/s),Memory Footprint (KB),Encrypt (ns/byte),Decrypt (ns/byte),Encrypt CPB*,Decrypt CPB*\n");
-#endif
+    uint8_t key[20] = {0};
+    uint8_t iv16[16] = {0};
+    uint8_t iv12[12] = {0};
+    uint8_t nonce[16] = {0};
 
-    printf("==================================================================================================================================================\n");
-    printf("                                              Cryptographic Algorithm Performance Benchmark\n");
-    printf("==================================================================================================================================================\n");
-    printf("Iterations: %d (< 64KB messages), %d (>= 64KB messages)\n\n", DEFAULT_ITERATIONS, LARGE_MSG_ITERATIONS);
+    for (size_t size = MIN_SIZE; size <= MAX_SIZE; size *= 4) {
+        int iterations = (size <= 65536) ? 10000 : 1000;
+        printf("=== %zu bytes, %d iterations ===\n", size, iterations);
 
-    benchmark_algorithm("AES-128-GCM", 16, 12, results_file);
-    benchmark_algorithm("AES-128-CBC", 16, 16, results_file);
-    benchmark_algorithm("AES-128-CTR", 16, 16, results_file);
-    benchmark_algorithm("ASCON-128",   16, 16, results_file);
-    benchmark_algorithm("ASCON-128a",  16, 16, results_file);
-    benchmark_algorithm("ASCON-80pq",  20, 16, results_file);
+        double enc_ns, enc_cycles, dec_ns, dec_cycles;
 
-    fclose(results_file);
-    printf("Benchmark complete. Results have been saved to benchmark_results.csv\n");
+        /* AES-CTR */
+        aes_bench_t actr = {0};
+        aes128ni_setkey(&actr.ctx, key);
+        actr.in = buf_in; actr.out = buf_mid; actr.len = size;
+        memcpy(actr.iv, iv16, 16);
+        run_bench(aes_ctr_call, &actr, size, iterations, &enc_ns, &enc_cycles);
+        run_bench(aes_ctr_call, &actr, size, iterations, &dec_ns, &dec_cycles);
+        write_csv(csv, "AES-128-CTR", size, enc_ns, enc_cycles, dec_ns, dec_cycles);
 
+        /* AES-CBC */
+        memcpy(actr.iv, iv16, 16);
+        run_bench(aes_cbc_enc_call, &actr, size, iterations, &enc_ns, &enc_cycles);
+        aes128ni_cbc_encrypt(&actr.ctx, actr.iv, buf_in, buf_mid, size); // prepare ciphertext
+        actr.in = buf_mid; actr.out = buf_out;
+        run_bench(aes_cbc_dec_call, &actr, size, iterations, &dec_ns, &dec_cycles);
+        write_csv(csv, "AES-128-CBC", size, enc_ns, enc_cycles, dec_ns, dec_cycles);
+
+        /* AES-GCM */
+        aes_gcm_bench_t agcm = {0};
+        agcm.key = key; agcm.iv = iv12; agcm.in = buf_in; agcm.out = buf_mid; agcm.len = size; agcm.tag = tag; agcm.tag_len = 16;
+        run_bench(aes_gcm_enc_call, &agcm, size, iterations, &enc_ns, &enc_cycles);
+        aes_gcm_enc_call(&agcm); // produce ciphertext
+        run_bench(aes_gcm_dec_call, &agcm, size, iterations, &dec_ns, &dec_cycles);
+        write_csv(csv, "AES-128-GCM", size, enc_ns, enc_cycles, dec_ns, dec_cycles);
+
+        /* ASCON-128 */
+        ascon_bench_t a128 = {0};
+        a128.key = key; a128.nonce = nonce; a128.ad = NULL; a128.ad_len = 0;
+        a128.in = buf_in; a128.out = buf_mid; a128.len = size; a128.tag = tag;
+        run_bench(ascon128_enc_call, &a128, size, iterations, &enc_ns, &enc_cycles);
+        ascon128_enc_call(&a128);
+        a128.in = buf_mid; a128.out = buf_out;
+        run_bench(ascon128_dec_call, &a128, size, iterations, &dec_ns, &dec_cycles);
+        write_csv(csv, "Ascon-128", size, enc_ns, enc_cycles, dec_ns, dec_cycles);
+
+        /* ASCON-128a */
+        a128.in = buf_in; a128.out = buf_mid; a128.len = size; a128.tag = tag;
+        run_bench(ascon128a_enc_call, &a128, size, iterations, &enc_ns, &enc_cycles);
+        ascon128a_enc_call(&a128);
+        a128.in = buf_mid; a128.out = buf_out;
+        run_bench(ascon128a_dec_call, &a128, size, iterations, &dec_ns, &dec_cycles);
+        write_csv(csv, "Ascon-128a", size, enc_ns, enc_cycles, dec_ns, dec_cycles);
+
+        /* ASCON-80pq */
+        a128.key = key; // first 20 bytes used
+        a128.in = buf_in; a128.out = buf_mid; a128.len = size; a128.tag = tag;
+        run_bench(ascon80pq_enc_call, &a128, size, iterations, &enc_ns, &enc_cycles);
+        ascon80pq_enc_call(&a128);
+        a128.in = buf_mid; a128.out = buf_out;
+        run_bench(ascon80pq_dec_call, &a128, size, iterations, &dec_ns, &dec_cycles);
+        write_csv(csv, "Ascon-80pq", size, enc_ns, enc_cycles, dec_ns, dec_cycles);
+    }
+
+    fclose(csv);
+    portable_aligned_free(buf_in);
+    portable_aligned_free(buf_mid);
+    portable_aligned_free(buf_out);
+    portable_aligned_free(tag);
+    printf("Results -> benchmark_results.csv\n");
     return 0;
 }

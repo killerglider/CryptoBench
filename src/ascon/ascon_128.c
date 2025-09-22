@@ -1,63 +1,147 @@
 /*
- * ASCON-128 wrapper (no heap allocation)
+ * ascon_128.c
  *
- * Uses the ascon_crypto_aead_encrypt/decrypt core functions which write ciphertext+tag
- * into a single buffer. This wrapper calls the core using the caller-provided ciphertext
- * buffer (which must have space for plaintext_len + tag_len). main.c already allocates
- * ciphertext with +16 bytes so this is safe in the benchmark harness.
- *
- * After core returns, the wrapper copies the tag portion into the tag buffer.
+ * Full AEAD implementation (encryption + decryption) using
+ * Level-3 SIMD permutation from ascon_core.c.
  */
 
 #include "../include/ascon.h"
 #include <string.h>
 #include <stdint.h>
+#include <immintrin.h>
 
-/* constants for variant */
-#define ASCON128_IV         0x80400c0600000000ULL
-#define ASCON128_KEY_LEN    16
-#define ASCON128_NONCE_LEN  16
-#define ASCON128_TAG_LEN    16
-#define ASCON128_RATE       8
+#define CRYPTO_KEYBYTES 16
+#define CRYPTO_NPUBBYTES 16
+#define CRYPTO_ABYTES 16
+#define RATE 8 /* Ascon-128 absorbs 64 bits per block */
 
-int ascon_128_encrypt(const uint8_t* key, size_t key_len,
-                      const uint8_t* nonce, size_t nonce_len,
-                      const uint8_t* plaintext, size_t plaintext_len,
-                      const uint8_t* aad, size_t aad_len,
-                      uint8_t* ciphertext, uint8_t* tag, size_t tag_len) {
-    if (key_len != ASCON128_KEY_LEN || nonce_len != ASCON128_NONCE_LEN || tag_len != ASCON128_TAG_LEN) return -1;
+int ascon_128_encrypt(const uint8_t *key, size_t key_len,
+                      const uint8_t *nonce, size_t nonce_len,
+                      const uint8_t *ad, size_t ad_len,
+                      const uint8_t *plaintext, size_t pt_len,
+                      uint8_t *ciphertext, uint8_t *tag, size_t tag_len) {
+    if (key_len != CRYPTO_KEYBYTES || nonce_len != CRYPTO_NPUBBYTES || tag_len != CRYPTO_ABYTES)
+        return -1;
 
-    /* The caller's ciphertext buffer MUST be at least plaintext_len + tag_len bytes.
-       main.c allocates that (max_size + 16) so it is safe for the benchmark. */
-    int result = ascon_crypto_aead_encrypt(ciphertext, plaintext, plaintext_len, aad, aad_len, nonce, key, ASCON128_KEY_LEN, ASCON128_IV, 12, 6, ASCON128_RATE);
-    if (result != 0) return result;
+    ascon_state s = {0};
 
-    /* core places tag at ciphertext + plaintext_len */
-    memcpy(tag, ciphertext + plaintext_len, tag_len);
+    /* Initialization: IV || Key || Nonce */
+    s.x[0] = 0x80400c0600000000ULL ^ (uint64_t) (key_len * 8);
+    memcpy(&s.x[1], key, 8);
+    memcpy(&s.x[2], key + 8, 8);
+    memcpy(&s.x[3], nonce, 8);
+    memcpy(&s.x[4], nonce + 8, 8);
+    ascon_permutation(&s);
 
-    /* optional: clear tag from ciphertext tail to maintain invariant that ciphertext length == plaintext_len */
-    /* memset(ciphertext + plaintext_len, 0, tag_len); */
+    /* absorb full key again */
+    s.x[3] ^= ((uint64_t*) key)[0];
+    s.x[4] ^= ((uint64_t*) key)[1];
+
+    /* Process associated data */
+    if (ad_len > 0) {
+        ascon_absorb(&s, ad, ad_len, RATE);
+    }
+
+    /* Domain separation */
+    s.x[4] ^= 1ULL;
+
+    /* Encrypt plaintext */
+    size_t i = 0;
+    while (i + RATE <= pt_len) {
+        uint64_t m = ((uint64_t*) (plaintext + i))[0];
+        s.x[0] ^= m;
+        ((uint64_t*) (ciphertext + i))[0] = s.x[0];
+        ascon_permutation(&s);
+        i += RATE;
+    }
+    /* final partial block */
+    uint8_t block[RATE] = {0};
+    size_t rem = pt_len - i;
+    memcpy(block, plaintext + i, rem);
+    block[rem] = 0x80;
+    uint64_t m = ((uint64_t*) block)[0];
+    s.x[0] ^= m;
+    ((uint64_t*) (ciphertext + i))[0] = s.x[0];
+    i += rem;
+
+    /* Finalization */
+    s.x[1] ^= ((uint64_t*) key)[0];
+    s.x[2] ^= ((uint64_t*) key)[1];
+    ascon_permutation(&s);
+    s.x[3] ^= ((uint64_t*) key)[0];
+    s.x[4] ^= ((uint64_t*) key)[1];
+
+    /* Tag */
+    ascon_squeeze(&s, tag, tag_len);
 
     return 0;
 }
 
-int ascon_128_decrypt(const uint8_t* key, size_t key_len,
-                      const uint8_t* nonce, size_t nonce_len,
-                      const uint8_t* ciphertext, size_t ciphertext_len,
-                      const uint8_t* aad, size_t aad_len,
-                      const uint8_t* tag, size_t tag_len,
-                      uint8_t* plaintext) {
-    if (key_len != ASCON128_KEY_LEN || nonce_len != ASCON128_NONCE_LEN || tag_len != ASCON128_TAG_LEN) return -1;
+int ascon_128_decrypt(const uint8_t *key, size_t key_len,
+                      const uint8_t *nonce, size_t nonce_len,
+                      const uint8_t *ad, size_t ad_len,
+                      const uint8_t *ciphertext, size_t ct_len,
+                      const uint8_t *tag, size_t tag_len,
+                      uint8_t *plaintext) {
+    if (key_len != CRYPTO_KEYBYTES || nonce_len != CRYPTO_NPUBBYTES || tag_len != CRYPTO_ABYTES)
+        return -1;
 
-    /* The core expects ciphertext+tag in one contiguous buffer. The benchmark's ciphertext
-       buffer was allocated with +16 bytes, so we can safely write the tag there before calling core. */
-    uint8_t* mutable_c = (uint8_t*)ciphertext; /* caller allocated buffer has extra tag space in main.c */
-    memcpy(mutable_c + ciphertext_len, tag, tag_len);
+    ascon_state s = {0};
 
-    int result = ascon_crypto_aead_decrypt(plaintext, mutable_c, ciphertext_len + tag_len, aad, aad_len, nonce, key, ASCON128_KEY_LEN, ASCON128_IV, 12, 6, ASCON128_RATE);
+    /* Initialization: IV || Key || Nonce */
+    s.x[0] = 0x80400c0600000000ULL ^ (uint64_t) (key_len * 8);
+    memcpy(&s.x[1], key, 8);
+    memcpy(&s.x[2], key + 8, 8);
+    memcpy(&s.x[3], nonce, 8);
+    memcpy(&s.x[4], nonce + 8, 8);
+    ascon_permutation(&s);
 
-    /* optional: clear temporary tag area */
-    /* memset(mutable_c + ciphertext_len, 0, tag_len); */
+    /* absorb full key again */
+    s.x[3] ^= ((uint64_t*) key)[0];
+    s.x[4] ^= ((uint64_t*) key)[1];
 
-    return result;
+    /* Process associated data */
+    if (ad_len > 0) {
+        ascon_absorb(&s, ad, ad_len, RATE);
+    }
+
+    /* Domain separation */
+    s.x[4] ^= 1ULL;
+
+    /* Decrypt ciphertext */
+    size_t i = 0;
+    while (i + RATE <= ct_len) {
+        uint64_t c = ((uint64_t*) (ciphertext + i))[0];
+        uint64_t m = s.x[0] ^ c;
+        ((uint64_t*) (plaintext + i))[0] = m;
+        s.x[0] = c;
+        ascon_permutation(&s);
+        i += RATE;
+    }
+    /* final partial block */
+    uint8_t block[RATE] = {0};
+    size_t rem = ct_len - i;
+    memcpy(block, ciphertext + i, rem);
+    uint64_t c = ((uint64_t*) block)[0];
+    uint64_t m = s.x[0] ^ c;
+    memcpy(plaintext + i, &m, rem);
+    block[rem] = 0x80;
+    s.x[0] = c & ~(((uint64_t) 0xFF) << (rem * 8));
+    s.x[0] ^= ((uint64_t*) block)[0];
+
+    /* Finalization */
+    s.x[1] ^= ((uint64_t*) key)[0];
+    s.x[2] ^= ((uint64_t*) key)[1];
+    ascon_permutation(&s);
+    s.x[3] ^= ((uint64_t*) key)[0];
+    s.x[4] ^= ((uint64_t*) key)[1];
+
+    /* Tag check */
+    uint8_t computed_tag[CRYPTO_ABYTES];
+    ascon_squeeze(&s, computed_tag, CRYPTO_ABYTES);
+    if (memcmp(computed_tag, tag, CRYPTO_ABYTES) != 0) {
+        return -1; /* authentication failed */
+    }
+
+    return 0;
 }

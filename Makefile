@@ -18,7 +18,7 @@ OPENSSL_LIB_PATH = C:/msys64/mingw64/lib
 
 # Compiler Flags:
 # -I is used to add include directories.
-CFLAGS = -Iinclude -I$(OPENSSL_INC_PATH) -Wall -O3
+CFLAGS = -Iinclude -I$(OPENSSL_INC_PATH) -Wall -O3 -maes -mpclmul
 
 # Linker Flags:
 # -L is used to add library search directories.

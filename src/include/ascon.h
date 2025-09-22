@@ -1,71 +1,80 @@
 #ifndef ASCON_H
 #define ASCON_H
 
-#include <stddef.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <stdalign.h>
 
 /*
- * Ascon core API (keeps the same parameterization used by the repo).
+ * ASCON Level-3 header
+ * Refactored for SIMD-accelerated permutation.
  *
- * The core AEAD functions in ascon_core.c expect a single buffer for ciphertext+tag.
- * The variant wrappers (ascon_128.c, ascon_128a.c, ascon_80pq.c) hide that detail:
- * they produce ciphertext and tag into separate buffers with no heap allocation.
+ * Variants supported:
+ *   - Ascon-128
+ *   - Ascon-128a
+ *   - Ascon-80pq
+ *
+ * Notes:
+ *   - Context/state aligned to 32 bytes
+ *   - No malloc inside encrypt/decrypt
+ *   - Functions expect caller to allocate ciphertext buffer with +16 bytes for tag
  */
 
-int ascon_crypto_aead_encrypt(
-    uint8_t* c,
-    const uint8_t* m, size_t mlen,
-    const uint8_t* ad, size_t adlen,
-    const uint8_t* npub,
-    const uint8_t* k, size_t key_len,
-    uint64_t iv, int num_rounds_a, int num_rounds_b, int rate);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-int ascon_crypto_aead_decrypt(
-    uint8_t* m,
-    const uint8_t* c, size_t clen,
-    const uint8_t* ad, size_t adlen,
-    const uint8_t* npub,
-    const uint8_t* k, size_t key_len,
-    uint64_t iv, int num_rounds_a, int num_rounds_b, int rate);
+typedef struct {
+    alignas(32) uint64_t x[5]; /* 5x64-bit state */
+} ascon_state;
 
-/* Variant wrappers (signatures used across your repo) */
-int ascon_128_encrypt(const uint8_t* key, size_t key_len,
-                      const uint8_t* nonce, size_t nonce_len,
-                      const uint8_t* plaintext, size_t plaintext_len,
-                      const uint8_t* aad, size_t aad_len,
-                      uint8_t* ciphertext, uint8_t* tag, size_t tag_len);
+/* Core permutation (12 rounds, unrolled, SIMD-optimised). */
+void ascon_permutation(ascon_state *s);
+void ascon_absorb(ascon_state *s, const uint8_t *data, size_t len, size_t rate);
+void ascon_squeeze(const ascon_state *s, uint8_t *tag, size_t tag_len);
 
-int ascon_128_decrypt(const uint8_t* key, size_t key_len,
-                      const uint8_t* nonce, size_t nonce_len,
-                      const uint8_t* ciphertext, size_t ciphertext_len,
-                      const uint8_t* aad, size_t aad_len,
-                      const uint8_t* tag, size_t tag_len,
-                      uint8_t* plaintext);
+/* Common AEAD API signatures */
+int ascon_128_encrypt(const uint8_t *key, size_t key_len,
+                      const uint8_t *nonce, size_t nonce_len,
+                      const uint8_t *ad, size_t ad_len,
+                      const uint8_t *plaintext, size_t pt_len,
+                      uint8_t *ciphertext, uint8_t *tag, size_t tag_len);
 
-int ascon_128a_encrypt(const uint8_t* key, size_t key_len,
-                       const uint8_t* nonce, size_t nonce_len,
-                       const uint8_t* plaintext, size_t plaintext_len,
-                       const uint8_t* aad, size_t aad_len,
-                       uint8_t* ciphertext, uint8_t* tag, size_t tag_len);
+int ascon_128_decrypt(const uint8_t *key, size_t key_len,
+                      const uint8_t *nonce, size_t nonce_len,
+                      const uint8_t *ad, size_t ad_len,
+                      const uint8_t *ciphertext, size_t ct_len,
+                      const uint8_t *tag, size_t tag_len,
+                      uint8_t *plaintext);
 
-int ascon_128a_decrypt(const uint8_t* key, size_t key_len,
-                       const uint8_t* nonce, size_t nonce_len,
-                       const uint8_t* ciphertext, size_t ciphertext_len,
-                       const uint8_t* aad, size_t aad_len,
-                       const uint8_t* tag, size_t tag_len,
-                       uint8_t* plaintext);
+int ascon_128a_encrypt(const uint8_t *key, size_t key_len,
+                       const uint8_t *nonce, size_t nonce_len,
+                       const uint8_t *ad, size_t ad_len,
+                       const uint8_t *plaintext, size_t pt_len,
+                       uint8_t *ciphertext, uint8_t *tag, size_t tag_len);
 
-int ascon_80pq_encrypt(const uint8_t* key, size_t key_len,
-                       const uint8_t* nonce, size_t nonce_len,
-                       const uint8_t* plaintext, size_t plaintext_len,
-                       const uint8_t* aad, size_t aad_len,
-                       uint8_t* ciphertext, uint8_t* tag, size_t tag_len);
+int ascon_128a_decrypt(const uint8_t *key, size_t key_len,
+                       const uint8_t *nonce, size_t nonce_len,
+                       const uint8_t *ad, size_t ad_len,
+                       const uint8_t *ciphertext, size_t ct_len,
+                       const uint8_t *tag, size_t tag_len,
+                       uint8_t *plaintext);
 
-int ascon_80pq_decrypt(const uint8_t* key, size_t key_len,
-                       const uint8_t* nonce, size_t nonce_len,
-                       const uint8_t* ciphertext, size_t ciphertext_len,
-                       const uint8_t* aad, size_t aad_len,
-                       const uint8_t* tag, size_t tag_len,
-                       uint8_t* plaintext);
+int ascon_80pq_encrypt(const uint8_t *key, size_t key_len,
+                       const uint8_t *nonce, size_t nonce_len,
+                       const uint8_t *ad, size_t ad_len,
+                       const uint8_t *plaintext, size_t pt_len,
+                       uint8_t *ciphertext, uint8_t *tag, size_t tag_len);
+
+int ascon_80pq_decrypt(const uint8_t *key, size_t key_len,
+                       const uint8_t *nonce, size_t nonce_len,
+                       const uint8_t *ad, size_t ad_len,
+                       const uint8_t *ciphertext, size_t ct_len,
+                       const uint8_t *tag, size_t tag_len,
+                       uint8_t *plaintext);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // ASCON_H

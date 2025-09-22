@@ -1,47 +1,151 @@
 /*
- * ASCON-128a wrapper (no heap allocation)
+ * ascon_128a.c
+ *
+ * Full AEAD implementation using SIMD permutation from ascon_core.c.
+ * Variant: Ascon-128a (rate = 16 bytes).
  */
 
 #include "../include/ascon.h"
 #include <string.h>
 #include <stdint.h>
 
-#define ASCON128a_IV        0x80800c0800000000ULL
-#define ASCON128a_KEY_LEN   16
-#define ASCON128a_NONCE_LEN 16
-#define ASCON128a_TAG_LEN   16
-#define ASCON128a_RATE      16
+#define CRYPTO_KEYBYTES 16
+#define CRYPTO_NPUBBYTES 16
+#define CRYPTO_ABYTES 16
+#define RATE 16 /* Ascon-128a absorbs 128 bits per block */
 
-int ascon_128a_encrypt(const uint8_t* key, size_t key_len,
-                       const uint8_t* nonce, size_t nonce_len,
-                       const uint8_t* plaintext, size_t plaintext_len,
-                       const uint8_t* aad, size_t aad_len,
-                       uint8_t* ciphertext, uint8_t* tag, size_t tag_len) {
-    if (key_len != ASCON128a_KEY_LEN || nonce_len != ASCON128a_NONCE_LEN || tag_len != ASCON128a_TAG_LEN) return -1;
+int ascon_128a_encrypt(const uint8_t *key, size_t key_len,
+                       const uint8_t *nonce, size_t nonce_len,
+                       const uint8_t *ad, size_t ad_len,
+                       const uint8_t *plaintext, size_t pt_len,
+                       uint8_t *ciphertext, uint8_t *tag, size_t tag_len) {
+    if (key_len != CRYPTO_KEYBYTES || nonce_len != CRYPTO_NPUBBYTES || tag_len != CRYPTO_ABYTES)
+        return -1;
 
-    int result = ascon_crypto_aead_encrypt(ciphertext, plaintext, plaintext_len, aad, aad_len, nonce, key, ASCON128a_KEY_LEN, ASCON128a_IV, 12, 8, ASCON128a_RATE);
-    if (result != 0) return result;
+    ascon_state s = {0};
 
-    memcpy(tag, ciphertext + plaintext_len, tag_len);
-    /* memset(ciphertext + plaintext_len, 0, tag_len); */
+    /* Initialization */
+    s.x[0] = 0x80800c0800000000ULL ^ (uint64_t) (key_len * 8);
+    memcpy(&s.x[1], key, 8);
+    memcpy(&s.x[2], key + 8, 8);
+    memcpy(&s.x[3], nonce, 8);
+    memcpy(&s.x[4], nonce + 8, 8);
+    ascon_permutation(&s);
 
+    /* absorb full key again */
+    s.x[3] ^= ((uint64_t*) key)[0];
+    s.x[4] ^= ((uint64_t*) key)[1];
+
+    /* Associated data */
+    if (ad_len > 0) {
+        ascon_absorb(&s, ad, ad_len, RATE);
+    }
+
+    /* Domain separation */
+    s.x[4] ^= 1ULL;
+
+    /* Encrypt plaintext */
+    size_t i = 0;
+    while (i + RATE <= pt_len) {
+        for (int j = 0; j < RATE / 8; j++) {
+            uint64_t m = ((uint64_t*) (plaintext + i))[j];
+            s.x[j] ^= m;
+            ((uint64_t*) (ciphertext + i))[j] = s.x[j];
+        }
+        ascon_permutation(&s);
+        i += RATE;
+    }
+    /* final partial block */
+    uint8_t block[RATE] = {0};
+    size_t rem = pt_len - i;
+    memcpy(block, plaintext + i, rem);
+    block[rem] = 0x80;
+    for (int j = 0; j < RATE / 8; j++) {
+        uint64_t m = ((uint64_t*) block)[j];
+        s.x[j] ^= m;
+        ((uint64_t*) (ciphertext + i))[j] = s.x[j];
+    }
+
+    /* Finalization */
+    s.x[1] ^= ((uint64_t*) key)[0];
+    s.x[2] ^= ((uint64_t*) key)[1];
+    ascon_permutation(&s);
+    s.x[3] ^= ((uint64_t*) key)[0];
+    s.x[4] ^= ((uint64_t*) key)[1];
+
+    /* Tag */
+    ascon_squeeze(&s, tag, tag_len);
     return 0;
 }
 
-int ascon_128a_decrypt(const uint8_t* key, size_t key_len,
-                       const uint8_t* nonce, size_t nonce_len,
-                       const uint8_t* ciphertext, size_t ciphertext_len,
-                       const uint8_t* aad, size_t aad_len,
-                       const uint8_t* tag, size_t tag_len,
-                       uint8_t* plaintext) {
-    if (key_len != ASCON128a_KEY_LEN || nonce_len != ASCON128a_NONCE_LEN || tag_len != ASCON128a_TAG_LEN) return -1;
+int ascon_128a_decrypt(const uint8_t *key, size_t key_len,
+                       const uint8_t *nonce, size_t nonce_len,
+                       const uint8_t *ad, size_t ad_len,
+                       const uint8_t *ciphertext, size_t ct_len,
+                       const uint8_t *tag, size_t tag_len,
+                       uint8_t *plaintext) {
+    if (key_len != CRYPTO_KEYBYTES || nonce_len != CRYPTO_NPUBBYTES || tag_len != CRYPTO_ABYTES)
+        return -1;
 
-    uint8_t* mutable_c = (uint8_t*)ciphertext;
-    memcpy(mutable_c + ciphertext_len, tag, tag_len);
+    ascon_state s = {0};
 
-    int result = ascon_crypto_aead_decrypt(plaintext, mutable_c, ciphertext_len + tag_len, aad, aad_len, nonce, key, ASCON128a_KEY_LEN, ASCON128a_IV, 12, 8, ASCON128a_RATE);
+    /* Initialization */
+    s.x[0] = 0x80800c0800000000ULL ^ (uint64_t) (key_len * 8);
+    memcpy(&s.x[1], key, 8);
+    memcpy(&s.x[2], key + 8, 8);
+    memcpy(&s.x[3], nonce, 8);
+    memcpy(&s.x[4], nonce + 8, 8);
+    ascon_permutation(&s);
 
-    /* memset(mutable_c + ciphertext_len, 0, tag_len); */
+    /* absorb full key again */
+    s.x[3] ^= ((uint64_t*) key)[0];
+    s.x[4] ^= ((uint64_t*) key)[1];
 
-    return result;
+    /* Associated data */
+    if (ad_len > 0) {
+        ascon_absorb(&s, ad, ad_len, RATE);
+    }
+
+    /* Domain separation */
+    s.x[4] ^= 1ULL;
+
+    /* Decrypt ciphertext */
+    size_t i = 0;
+    while (i + RATE <= ct_len) {
+        for (int j = 0; j < RATE / 8; j++) {
+            uint64_t c = ((uint64_t*) (ciphertext + i))[j];
+            uint64_t m = s.x[j] ^ c;
+            ((uint64_t*) (plaintext + i))[j] = m;
+            s.x[j] = c;
+        }
+        ascon_permutation(&s);
+        i += RATE;
+    }
+    /* final partial block */
+    uint8_t block[RATE] = {0};
+    size_t rem = ct_len - i;
+    memcpy(block, ciphertext + i, rem);
+    for (int j = 0; j < RATE / 8; j++) {
+        uint64_t c = ((uint64_t*) block)[j];
+        uint64_t m = s.x[j] ^ c;
+        memcpy(plaintext + i, &m, rem);
+        block[rem] = 0x80;
+        s.x[j] = c & ~(((uint64_t)0xFF) << (rem * 8));
+        s.x[j] ^= ((uint64_t*) block)[j];
+    }
+
+    /* Finalization */
+    s.x[1] ^= ((uint64_t*) key)[0];
+    s.x[2] ^= ((uint64_t*) key)[1];
+    ascon_permutation(&s);
+    s.x[3] ^= ((uint64_t*) key)[0];
+    s.x[4] ^= ((uint64_t*) key)[1];
+
+    /* Tag check */
+    uint8_t computed_tag[CRYPTO_ABYTES];
+    ascon_squeeze(&s, computed_tag, CRYPTO_ABYTES);
+    if (memcmp(computed_tag, tag, CRYPTO_ABYTES) != 0) {
+        return -1; /* authentication failed */
+    }
+    return 0;
 }
