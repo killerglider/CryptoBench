@@ -7,11 +7,11 @@ TARGET = benchmark
 
 # Path to the OpenSSL 'include' directory (for header files like evp.h)
 # Example for MinGW/MSYS2 on Windows.
-OPENSSL_INC_PATH = C:/msys64/mingw64/include
+OPENSSL_INC_PATH = /opt/homebrew/opt/openssl/include
 
 # Path to the OpenSSL 'lib' directory (for the library files)
 # Example for MinGW/MSYS2 on Windows.
-OPENSSL_LIB_PATH = C:/msys64/mingw64/lib
+OPENSSL_LIB_PATH = /opt/homebrew/opt/openssl/lib
 
 
 # --- Flags (No need to edit below this line) ---
