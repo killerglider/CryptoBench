@@ -34,7 +34,6 @@ extern int aes_gcm_decrypt(const uint8_t *key, size_t key_len,
 
 #define MIN_SIZE 16
 #define MAX_SIZE (4 * 1024 * 1024)
-#define ALIGN 32
 
 /* aligned allocation */
 static void* portable_aligned_alloc(size_t alignment, size_t size) {
@@ -207,10 +206,10 @@ int main(void) {
                  "Encrypt (ns/byte),Decrypt (ns/byte),Encrypt CPB,Decrypt CPB\n");
 #endif
 
-    uint8_t *buf_in  = portable_aligned_alloc(ALIGN, MAX_SIZE);
-    uint8_t *buf_mid = portable_aligned_alloc(ALIGN, MAX_SIZE);
-    uint8_t *buf_out = portable_aligned_alloc(ALIGN, MAX_SIZE);
-    uint8_t *tag     = portable_aligned_alloc(ALIGN, 16);
+    uint8_t *buf_in  = portable_aligned_alloc(32, MAX_SIZE);
+    uint8_t *buf_mid = portable_aligned_alloc(32, MAX_SIZE);
+    uint8_t *buf_out = portable_aligned_alloc(32, MAX_SIZE);
+    uint8_t *tag     = portable_aligned_alloc(32, 16);
     if (!buf_in || !buf_mid || !buf_out || !tag) { perror("malloc"); return 1; }
     memset(buf_in, 0xA5, MAX_SIZE);
 
