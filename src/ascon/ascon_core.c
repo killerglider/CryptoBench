@@ -20,9 +20,7 @@ static const uint64_t RC[12] = {
 };
 
 /* rotate right 64 on each lane of a uint64x2_t */
-static inline uint64x2_t rotr64_u64x2(uint64x2_t x, int n) {
-    return vorrq_u64(vshrq_n_u64(x, n), vshlq_n_u64(x, 64 - n));
-}
+#define ROTR64_U64X2(x, n) vorrq_u64(vshrq_n_u64(x, n), vshlq_n_u64(x, 64 - (n)))
 
 void ascon_permutation(ascon_state *s) {
     /* load state into vectors, upper lane zeroed to match SSE implementation */
@@ -51,15 +49,15 @@ void ascon_permutation(ascon_state *s) {
         uint64x2_t t4 = x4;
 
         /* x0 = x0 ^ (~x1 & x2) */
-        x0 = veorq_u64(x0, vandq_u64(t2, vmvnq_u64(t1)));
+        x0 = veorq_u64(x0, vbicq_u64(t2, t1));
         /* x1 = x1 ^ (~x2 & x3) */
-        x1 = veorq_u64(x1, vandq_u64(t3, vmvnq_u64(t2)));
+        x1 = veorq_u64(x1, vbicq_u64(t3, t2));
         /* x2 = x2 ^ (~x3 & x4) */
-        x2 = veorq_u64(x2, vandq_u64(t4, vmvnq_u64(t3)));
+        x2 = veorq_u64(x2, vbicq_u64(t4, t3));
         /* x3 = x3 ^ (~x4 & t0) */
-        x3 = veorq_u64(x3, vandq_u64(t0, vmvnq_u64(t4)));
+        x3 = veorq_u64(x3, vbicq_u64(t0, t4));
         /* x4 = x4 ^ (~t0 & t1) */
-        x4 = veorq_u64(x4, vandq_u64(t1, vmvnq_u64(t0)));
+        x4 = veorq_u64(x4, vbicq_u64(t1, t0));
 
         /* linear layer of xors */
         x1 = veorq_u64(x1, x0);
@@ -70,20 +68,20 @@ void ascon_permutation(ascon_state *s) {
         x2 = veorq_u64(x2, allones);
 
         /* linear diffusion layer (rotations and xors) */
-        x0 = veorq_u64(x0, rotr64_u64x2(x0, 19));
-        x0 = veorq_u64(x0, rotr64_u64x2(x0, 28));
+        x0 = veorq_u64(x0, ROTR64_U64X2(x0, 19));
+        x0 = veorq_u64(x0, ROTR64_U64X2(x0, 28));
 
-        x1 = veorq_u64(x1, rotr64_u64x2(x1, 61));
-        x1 = veorq_u64(x1, rotr64_u64x2(x1, 39));
+        x1 = veorq_u64(x1, ROTR64_U64X2(x1, 61));
+        x1 = veorq_u64(x1, ROTR64_U64X2(x1, 39));
 
-        x2 = veorq_u64(x2, rotr64_u64x2(x2, 1));
-        x2 = veorq_u64(x2, rotr64_u64x2(x2, 6));
+        x2 = veorq_u64(x2, ROTR64_U64X2(x2, 1));
+        x2 = veorq_u64(x2, ROTR64_U64X2(x2, 6));
 
-        x3 = veorq_u64(x3, rotr64_u64x2(x3, 10));
-        x3 = veorq_u64(x3, rotr64_u64x2(x3, 17));
+        x3 = veorq_u64(x3, ROTR64_U64X2(x3, 10));
+        x3 = veorq_u64(x3, ROTR64_U64X2(x3, 17));
 
-        x4 = veorq_u64(x4, rotr64_u64x2(x4, 7));
-        x4 = veorq_u64(x4, rotr64_u64x2(x4, 41));
+        x4 = veorq_u64(x4, ROTR64_U64X2(x4, 7));
+        x4 = veorq_u64(x4, ROTR64_U64X2(x4, 41));
     }
 
     /* store back lower lanes */
