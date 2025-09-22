@@ -1,87 +1,101 @@
 /*
- * ascon_core.c
+ * ascon_core_arm.c
  *
- * ASCON permutation + helpers, Level-3:
- *   - Fully unrolled 12 rounds
- *   - State kept in 5x64-bit SIMD registers (__m128i)
- *   - Aligned state
+ * ASCON permutation + helpers (ARMv8-A AArch64 NEON intrinsics)
+ * - Replacement for ascon_core.c using x86 SIMD
+ * - Operates on 5x64-bit state, kept in uint64x2_t vectors (lower lane used)
+ * - Fully unrolled 12 rounds (looped here for clarity)
  */
 
 #include "../include/ascon.h"
-#include <immintrin.h>  // SSE2/AVX2 intrinsics
+#include <arm_neon.h>
 #include <string.h>
 #include <stdint.h>
 
 /* Round constants (12 for Ascon-128/128a/80pq) */
 static const uint64_t RC[12] = {
-    0xF0, 0xE1, 0xD2, 0xC3,
-    0xB4, 0xA5, 0x96, 0x87,
-    0x78, 0x69, 0x5A, 0x4B
+    0xF0ULL, 0xE1ULL, 0xD2ULL, 0xC3ULL,
+    0xB4ULL, 0xA5ULL, 0x96ULL, 0x87ULL,
+    0x78ULL, 0x69ULL, 0x5AULL, 0x4BULL
 };
 
-/* rotate right (64-bit) using intrinsics */
-static inline __m128i rotr64(__m128i x, int n) {
-    return _mm_or_si128(_mm_srli_epi64(x, n),
-                        _mm_slli_epi64(x, 64 - n));
+/* rotate right 64 on each lane of a uint64x2_t */
+static inline uint64x2_t rotr64_u64x2(uint64x2_t x, int n) {
+    return vorrq_u64(vshrq_n_u64(x, n), vshlq_n_u64(x, 64 - n));
 }
 
 void ascon_permutation(ascon_state *s) {
-    __m128i x0 = _mm_set_epi64x(0, s->x[0]);
-    __m128i x1 = _mm_set_epi64x(0, s->x[1]);
-    __m128i x2 = _mm_set_epi64x(0, s->x[2]);
-    __m128i x3 = _mm_set_epi64x(0, s->x[3]);
-    __m128i x4 = _mm_set_epi64x(0, s->x[4]);
+    /* load state into vectors, upper lane zeroed to match SSE implementation */
+    uint64x2_t x0 = vsetq_lane_u64(s->x[0], vdupq_n_u64(0), 0);
+    uint64x2_t x1 = vsetq_lane_u64(s->x[1], vdupq_n_u64(0), 0);
+    uint64x2_t x2 = vsetq_lane_u64(s->x[2], vdupq_n_u64(0), 0);
+    uint64x2_t x3 = vsetq_lane_u64(s->x[3], vdupq_n_u64(0), 0);
+    uint64x2_t x4 = vsetq_lane_u64(s->x[4], vdupq_n_u64(0), 0);
 
     for (int r = 0; r < 12; r++) {
-        /* add round constant */
-        __m128i rc = _mm_set_epi64x(0, RC[r]);
-        x2 = _mm_xor_si128(x2, rc);
+        /* add round constant to x2 (lower lane) */
+        uint64x2_t rc = vsetq_lane_u64(RC[r], vdupq_n_u64(0), 0);
+        x2 = veorq_u64(x2, rc);
 
-        /* substitution layer */
-        __m128i t0 = x0;
-        __m128i t1 = x1;
-        __m128i t2 = x2;
-        __m128i t3 = x3;
-        __m128i t4 = x4;
+        /* substitution layer
+           x0 ^= ~x1 & x2
+           x1 ^= ~x2 & x3
+           x2 ^= ~x3 & x4
+           x3 ^= ~x4 & x0_prev
+           x4 ^= ~x0_prev & x1_prev
+        */
+        uint64x2_t t0 = x0;
+        uint64x2_t t1 = x1;
+        uint64x2_t t2 = x2;
+        uint64x2_t t3 = x3;
+        uint64x2_t t4 = x4;
 
-        x0 = _mm_xor_si128(x0, _mm_andnot_si128(x1, x2));
-        x1 = _mm_xor_si128(x1, _mm_andnot_si128(x2, x3));
-        x2 = _mm_xor_si128(x2, _mm_andnot_si128(x3, x4));
-        x3 = _mm_xor_si128(x3, _mm_andnot_si128(x4, t0));
-        x4 = _mm_xor_si128(x4, _mm_andnot_si128(t0, t1));
+        /* x0 = x0 ^ (~x1 & x2) */
+        x0 = veorq_u64(x0, vandq_u64(t2, vmvnq_u64(t1)));
+        /* x1 = x1 ^ (~x2 & x3) */
+        x1 = veorq_u64(x1, vandq_u64(t3, vmvnq_u64(t2)));
+        /* x2 = x2 ^ (~x3 & x4) */
+        x2 = veorq_u64(x2, vandq_u64(t4, vmvnq_u64(t3)));
+        /* x3 = x3 ^ (~x4 & t0) */
+        x3 = veorq_u64(x3, vandq_u64(t0, vmvnq_u64(t4)));
+        /* x4 = x4 ^ (~t0 & t1) */
+        x4 = veorq_u64(x4, vandq_u64(t1, vmvnq_u64(t0)));
 
-        x1 = _mm_xor_si128(x1, x0);
-        x0 = _mm_xor_si128(x0, x4);
-        x3 = _mm_xor_si128(x3, x2);
-        x2 = _mm_xor_si128(x2, _mm_set1_epi64x(~0ULL));
+        /* linear layer of xors */
+        x1 = veorq_u64(x1, x0);
+        x0 = veorq_u64(x0, x4);
+        x3 = veorq_u64(x3, x2);
+        /* x2 = x2 ^ (~0ULL) */
+        uint64x2_t allones = vdupq_n_u64(~(uint64_t)0);
+        x2 = veorq_u64(x2, allones);
 
-        /* linear diffusion layer (rotations) */
-        x0 = _mm_xor_si128(x0, rotr64(x0, 19));
-        x0 = _mm_xor_si128(x0, rotr64(x0, 28));
+        /* linear diffusion layer (rotations and xors) */
+        x0 = veorq_u64(x0, rotr64_u64x2(x0, 19));
+        x0 = veorq_u64(x0, rotr64_u64x2(x0, 28));
 
-        x1 = _mm_xor_si128(x1, rotr64(x1, 61));
-        x1 = _mm_xor_si128(x1, rotr64(x1, 39));
+        x1 = veorq_u64(x1, rotr64_u64x2(x1, 61));
+        x1 = veorq_u64(x1, rotr64_u64x2(x1, 39));
 
-        x2 = _mm_xor_si128(x2, rotr64(x2, 1));
-        x2 = _mm_xor_si128(x2, rotr64(x2, 6));
+        x2 = veorq_u64(x2, rotr64_u64x2(x2, 1));
+        x2 = veorq_u64(x2, rotr64_u64x2(x2, 6));
 
-        x3 = _mm_xor_si128(x3, rotr64(x3, 10));
-        x3 = _mm_xor_si128(x3, rotr64(x3, 17));
+        x3 = veorq_u64(x3, rotr64_u64x2(x3, 10));
+        x3 = veorq_u64(x3, rotr64_u64x2(x3, 17));
 
-        x4 = _mm_xor_si128(x4, rotr64(x4, 7));
-        x4 = _mm_xor_si128(x4, rotr64(x4, 41));
+        x4 = veorq_u64(x4, rotr64_u64x2(x4, 7));
+        x4 = veorq_u64(x4, rotr64_u64x2(x4, 41));
     }
 
-    s->x[0] = (uint64_t)_mm_cvtsi128_si64(x0);
-    s->x[1] = (uint64_t)_mm_cvtsi128_si64(x1);
-    s->x[2] = (uint64_t)_mm_cvtsi128_si64(x2);
-    s->x[3] = (uint64_t)_mm_cvtsi128_si64(x3);
-    s->x[4] = (uint64_t)_mm_cvtsi128_si64(x4);
+    /* store back lower lanes */
+    s->x[0] = vgetq_lane_u64(x0, 0);
+    s->x[1] = vgetq_lane_u64(x1, 0);
+    s->x[2] = vgetq_lane_u64(x2, 0);
+    s->x[3] = vgetq_lane_u64(x3, 0);
+    s->x[4] = vgetq_lane_u64(x4, 0);
 }
 
 /* === Helpers for AEAD === */
 
-/* absorb data into state */
 void ascon_absorb(ascon_state *s, const uint8_t *data, size_t len, size_t rate) {
     size_t i = 0;
     while (i + rate <= len) {
@@ -102,7 +116,6 @@ void ascon_absorb(ascon_state *s, const uint8_t *data, size_t len, size_t rate) 
     ascon_permutation(s);
 }
 
-/* squeeze out tag */
 void ascon_squeeze(const ascon_state *s, uint8_t *tag, size_t tag_len) {
     for (size_t j = 0; j < tag_len / 8; j++) {
         ((uint64_t*) tag)[j] = s->x[j];

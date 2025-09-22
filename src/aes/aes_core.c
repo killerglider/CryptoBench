@@ -1,29 +1,38 @@
-#include "../include/aes_ni.h"
-#include <wmmintrin.h>   // AES-NI intrinsics
-#include <stdint.h>  
+#include "../include/aes_arm.h"
+#include <openssl/aes.h>
+#include <string.h>
+#include <assert.h>
 
-/* expand one round key */
-static inline __m128i aes128_keyexpand(__m128i key, int rcon) {
-    __m128i temp = _mm_aeskeygenassist_si128(key, rcon);
-    temp = _mm_shuffle_epi32(temp, _MM_SHUFFLE(3,3,3,3));
-    key = _mm_xor_si128(key, _mm_slli_si128(key, 4));
-    key = _mm_xor_si128(key, _mm_slli_si128(key, 4));
-    key = _mm_xor_si128(key, _mm_slli_si128(key, 4));
-    return _mm_xor_si128(key, temp);
+/* We'll store both encrypt and decrypt AES_KEY structures inside the ctx buffer.
+   AES_KEY size is implementation-defined but small; we reserve space for two AES_KEY instances. */
+typedef struct {
+    AES_KEY enc;
+    AES_KEY dec;
+} aes_key_storage;
+
+/* helpers */
+static aes_key_storage* key_storage_from_ctx(aes128arm_ctx *ctx) {
+    return (aes_key_storage*)ctx->rk_buffer;
+}
+static const aes_key_storage* key_storage_from_ctx_const(const aes128arm_ctx *ctx) {
+    return (const aes_key_storage*)ctx->rk_buffer;
 }
 
-void aes128ni_setkey(aes128ni_ctx *ctx, const uint8_t *key) {
-    __m128i k = _mm_loadu_si128((const __m128i*)key);
-    ctx->round_keys[0] = k;
+/* set key (store both encrypt and decrypt expanded keys) */
+void aes128arm_setkey(aes128arm_ctx *ctx, const uint8_t *key) {
+    aes_key_storage *ks = key_storage_from_ctx(ctx);
+    AES_set_encrypt_key(key, 128, &ks->enc);
+    AES_set_decrypt_key(key, 128, &ks->dec);
+}
 
-    ctx->round_keys[1]  = aes128_keyexpand(ctx->round_keys[0], 0x01);
-    ctx->round_keys[2]  = aes128_keyexpand(ctx->round_keys[1], 0x02);
-    ctx->round_keys[3]  = aes128_keyexpand(ctx->round_keys[2], 0x04);
-    ctx->round_keys[4]  = aes128_keyexpand(ctx->round_keys[3], 0x08);
-    ctx->round_keys[5]  = aes128_keyexpand(ctx->round_keys[4], 0x10);
-    ctx->round_keys[6]  = aes128_keyexpand(ctx->round_keys[5], 0x20);
-    ctx->round_keys[7]  = aes128_keyexpand(ctx->round_keys[6], 0x40);
-    ctx->round_keys[8]  = aes128_keyexpand(ctx->round_keys[7], 0x80);
-    ctx->round_keys[9]  = aes128_keyexpand(ctx->round_keys[8], 0x1B);
-    ctx->round_keys[10] = aes128_keyexpand(ctx->round_keys[9], 0x36);
+/* block encrypt using enc key */
+void aes128arm_block_encrypt(const aes128arm_ctx *ctx, const uint8_t in[16], uint8_t out[16]) {
+    const aes_key_storage *ks = key_storage_from_ctx_const(ctx);
+    AES_encrypt(in, out, &ks->enc);
+}
+
+/* block decrypt using dec key (may be useful for CBC decrypt) */
+void aes128arm_block_decrypt(const aes128arm_ctx *ctx, const uint8_t in[16], uint8_t out[16]) {
+    const aes_key_storage *ks = key_storage_from_ctx_const(ctx);
+    AES_decrypt(in, out, &ks->dec);
 }

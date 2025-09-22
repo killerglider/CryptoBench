@@ -1,40 +1,49 @@
-#include "../include/aes_ni.h"
-#include <wmmintrin.h>   // AES-NI intrinsics
-#include <stddef.h>
-#include <stdint.h>
+/*
+ * aes_arm_ctr.c
+ *
+ * CTR mode using aes_arm_core.c block encrypt.
+ * Counter format: treat last 64 bits as little-endian counter increment.
+ */
+
+#include "../include/aes_arm.h"
 #include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
 
-void aes128ni_ctr_crypt(const aes128ni_ctx *ctx, const uint8_t iv[16],
-                        const uint8_t *in, uint8_t *out, size_t len) {
-    __m128i ctr = _mm_loadu_si128((const __m128i*)iv);
+/* increment 128-bit big-endian counter stored in 16-byte array (increment low 64 bits) */
+static void ctr_increment(uint8_t ctr[16]) {
+    /* treat bytes 8..15 as little-endian 64-bit counter */
+    uint64_t *low = (uint64_t*)(ctr + 8);
+    /* portable increment using uint64_t */
+    (*low)++;
+}
 
-    size_t blocks = len / 16;
-    for (size_t i = 0; i < blocks; i++) {
-        __m128i tmp = ctr;
-        tmp = _mm_xor_si128(tmp, ctx->round_keys[0]);
-        for (int r = 1; r < 10; r++)
-            tmp = _mm_aesenc_si128(tmp, ctx->round_keys[r]);
-        tmp = _mm_aesenclast_si128(tmp, ctx->round_keys[10]);
+/* CTR crypt: encrypt the counter and XOR with input */
+void aes128arm_ctr_crypt(const aes128arm_ctx *ctx, const uint8_t iv[16],
+                         const uint8_t *in, uint8_t *out, size_t len) {
+    uint8_t counter[16];
+    memcpy(counter, iv, 16);
 
-        __m128i block = _mm_loadu_si128((const __m128i*)(in + i*16));
-        block = _mm_xor_si128(block, tmp);
-        _mm_storeu_si128((__m128i*)(out + i*16), block);
+    uint8_t keystream[16];
+    size_t full_blocks = len / 16;
+    size_t rem = len % 16;
 
-        ctr = _mm_add_epi64(ctr, _mm_set_epi64x(0, 1)); // increment low 64 bits
+    for (size_t i = 0; i < full_blocks; i++) {
+        /* encrypt counter to get keystream block */
+        /* const cast needed because aes128arm_block_encrypt expects non-const ctx; safe */
+        aes128arm_block_encrypt((const aes128arm_ctx*)ctx, counter, keystream);
+        /* XOR keystream with plaintext to produce ciphertext */
+        const uint8_t *p = in + i * 16;
+        uint8_t *q = out + i * 16;
+        for (int b = 0; b < 16; ++b) q[b] = p[b] ^ keystream[b];
+        /* increment counter */
+        ctr_increment(counter);
     }
 
-    /* leftover bytes */
-    size_t rem = len % 16;
     if (rem) {
-        __m128i tmp = ctr;
-        tmp = _mm_xor_si128(tmp, ctx->round_keys[0]);
-        for (int r = 1; r < 10; r++)
-            tmp = _mm_aesenc_si128(tmp, ctx->round_keys[r]);
-        tmp = _mm_aesenclast_si128(tmp, ctx->round_keys[10]);
-
-        uint8_t keystream[16];
-        _mm_storeu_si128((__m128i*)keystream, tmp);
-        for (size_t j = 0; j < rem; j++)
-            out[blocks*16 + j] = in[blocks*16 + j] ^ keystream[j];
+        aes128arm_block_encrypt((const aes128arm_ctx*)ctx, counter, keystream);
+        const uint8_t *p = in + full_blocks * 16;
+        uint8_t *q = out + full_blocks * 16;
+        for (size_t b = 0; b < rem; ++b) q[b] = p[b] ^ keystream[b];
     }
 }
