@@ -5,9 +5,31 @@
 #include <string.h>
 #include <stdint.h>
 
-// Helper macros to load and store 64-bit words from byte arrays
-#define GET_U64(p) (*((uint64_t*)(p)))
-#define SET_U64(p, v) (*((uint64_t*)(p)) = (v))
+// Helper functions to load and store 64-bit words from byte arrays (Level 0)
+static uint64_t load_u64(const uint8_t *p) {
+    uint64_t res = 0;
+    res |= ((uint64_t)p[0]) << 56;
+    res |= ((uint64_t)p[1]) << 48;
+    res |= ((uint64_t)p[2]) << 40;
+    res |= ((uint64_t)p[3]) << 32;
+    res |= ((uint64_t)p[4]) << 24;
+    res |= ((uint64_t)p[5]) << 16;
+    res |= ((uint64_t)p[6]) << 8;
+    res |= ((uint64_t)p[7]) << 0;
+    return res;
+}
+
+static void store_u64(uint8_t *p, uint64_t v) {
+    p[0] = (uint8_t)(v >> 56);
+    p[1] = (uint8_t)(v >> 48);
+    p[2] = (uint8_t)(v >> 40);
+    p[3] = (uint8_t)(v >> 32);
+    p[4] = (uint8_t)(v >> 24);
+    p[5] = (uint8_t)(v >> 16);
+    p[6] = (uint8_t)(v >> 8);
+    p[7] = (uint8_t)(v >> 0);
+}
+
 
 // ROTR64: Rotates a 64-bit word to the right
 #define ROTR64(x, n) (((x) >> (n)) | ((x) << (64 - (n))))
@@ -56,36 +78,36 @@ int ascon_crypto_aead_encrypt(
     // --- Initialization ---
     if (key_len == 20) { // ASCON-80pq with 20-byte key
         s[0] = iv;
-        s[1] = GET_U64(k);
-        s[2] = GET_U64(k + 8);
+        s[1] = load_u64(k);
+        s[2] = load_u64(k + 8);
         s[3] = (uint64_t)(*(uint32_t*)(k + 16)); // Load the last 4 bytes of the key
-        s[3] |= GET_U64(npub) << 32;
-        s[4] = GET_U64(npub + 4);
+        s[3] |= load_u64(npub) << 32;
+        s[4] = load_u64(npub + 4);
 
     } else { // ASCON-128 and 128a with 16-byte key
         s[0] = iv;
-        s[1] = GET_U64(k);
-        s[2] = GET_U64(k + 8);
-        s[3] = GET_U64(npub);
-        s[4] = GET_U64(npub + 8);
+        s[1] = load_u64(k);
+        s[2] = load_u64(k + 8);
+        s[3] = load_u64(npub);
+        s[4] = load_u64(npub + 8);
     }
 
     ascon_permutation(s, num_rounds_a);
 
     // XOR key into state after initialization permutation
     if (key_len == 20) {
-        s[2] ^= GET_U64(k + 4);
-        s[3] ^= GET_U64(k + 12);
+        s[2] ^= load_u64(k + 4);
+        s[3] ^= load_u64(k + 12);
     } else {
-        s[3] ^= GET_U64(k);
-        s[4] ^= GET_U64(k + 8);
+        s[3] ^= load_u64(k);
+        s[4] ^= load_u64(k + 8);
     }
 
     // --- Process Associated Data ---
     if (adlen) {
         while (adlen >= (size_t)rate) {
-            s[0] ^= GET_U64(ad);
-            if (rate == 16) s[1] ^= GET_U64(ad + 8);
+            s[0] ^= load_u64(ad);
+            if (rate == 16) s[1] ^= load_u64(ad + 8);
             ascon_permutation(s, num_rounds_b);
             ad += rate;
             adlen -= rate;
@@ -100,10 +122,10 @@ int ascon_crypto_aead_encrypt(
     // --- Process Plaintext ---
     size_t clen_total = mlen;
     while (mlen >= (size_t)rate) {
-        s[0] ^= GET_U64(m);
-        if (rate == 16) s[1] ^= GET_U64(m + 8);
-        SET_U64(c, s[0]);
-        if (rate == 16) SET_U64(c + 8, s[1]);
+        s[0] ^= load_u64(m);
+        if (rate == 16) s[1] ^= load_u64(m + 8);
+        store_u64(c, s[0]);
+        if (rate == 16) store_u64(c + 8, s[1]);
         ascon_permutation(s, num_rounds_b);
         m += rate;
         c += rate;
@@ -118,16 +140,18 @@ int ascon_crypto_aead_encrypt(
 
     // XOR key to generate the tag
     if (key_len == 20) {
-        s[3] ^= GET_U64(k + 4);
-        s[4] ^= GET_U64(k + 12);
+        s[3] ^= load_u64(k + 4);
+        s[4] ^= load_u64(k + 12);
     } else {
-        s[3] ^= GET_U64(k);
-        s[4] ^= GET_U64(k + 8);
+        s[3] ^= load_u64(k);
+        s[4] ^= load_u64(k + 8);
     }
     
     // Write tag to the end of the ciphertext
-    memcpy(c + mlen, &s[3], 8);
-    memcpy(c + mlen + 8, &s[4], 8);
+    uint8_t tag_bytes[16];
+    store_u64(tag_bytes, s[3]);
+    store_u64(tag_bytes + 8, s[4]);
+    memcpy(c + mlen, tag_bytes, 16);
 
     return 0;
 }
@@ -148,34 +172,34 @@ int ascon_crypto_aead_decrypt(
     // --- Initialization (same as encryption) ---
     if (key_len == 20) {
         s[0] = iv;
-        s[1] = GET_U64(k);
-        s[2] = GET_U64(k + 8);
+        s[1] = load_u64(k);
+        s[2] = load_u64(k + 8);
         s[3] = (uint64_t)(*(uint32_t*)(k + 16));
-        s[3] |= GET_U64(npub) << 32;
-        s[4] = GET_U64(npub + 4);
+        s[3] |= load_u64(npub) << 32;
+        s[4] = load_u64(npub + 4);
     } else {
         s[0] = iv;
-        s[1] = GET_U64(k);
-        s[2] = GET_U64(k + 8);
-        s[3] = GET_U64(npub);
-        s[4] = GET_U64(npub + 8);
+        s[1] = load_u64(k);
+        s[2] = load_u64(k + 8);
+        s[3] = load_u64(npub);
+        s[4] = load_u64(npub + 8);
     }
 
     ascon_permutation(s, num_rounds_a);
 
     if (key_len == 20) {
-        s[2] ^= GET_U64(k + 4);
-        s[3] ^= GET_U64(k + 12);
+        s[2] ^= load_u64(k + 4);
+        s[3] ^= load_u64(k + 12);
     } else {
-        s[3] ^= GET_U64(k);
-        s[4] ^= GET_U64(k + 8);
+        s[3] ^= load_u64(k);
+        s[4] ^= load_u64(k + 8);
     }
 
     // --- Process Associated Data (same as encryption) ---
     if (adlen) {
         while (adlen >= (size_t)rate) {
-            s[0] ^= GET_U64(ad);
-            if (rate == 16) s[1] ^= GET_U64(ad + 8);
+            s[0] ^= load_u64(ad);
+            if (rate == 16) s[1] ^= load_u64(ad + 8);
             ascon_permutation(s, num_rounds_b);
             ad += rate;
             adlen -= rate;
@@ -188,11 +212,14 @@ int ascon_crypto_aead_decrypt(
 
     // --- Process Ciphertext ---
     size_t clen_without_tag = mlen;
+    const uint8_t* c_orig = c; // Save original pointer
+    uint8_t* m_orig = m;       // Save original pointer
+
     while (clen_without_tag >= (size_t)rate) {
-        uint64_t c0 = GET_U64(c);
-        uint64_t c1 = (rate == 16) ? GET_U64(c + 8) : 0;
-        SET_U64(m, s[0] ^ c0);
-        if (rate == 16) SET_U64(m + 8, s[1] ^ c1);
+        uint64_t c0 = load_u64(c);
+        uint64_t c1 = (rate == 16) ? load_u64(c + 8) : 0;
+        store_u64(m, s[0] ^ c0);
+        if (rate == 16) store_u64(m + 8, s[1] ^ c1);
         s[0] = c0;
         if (rate == 16) s[1] = c1;
         ascon_permutation(s, num_rounds_b);
@@ -212,19 +239,19 @@ int ascon_crypto_aead_decrypt(
     ascon_permutation(s, num_rounds_a);
 
     if (key_len == 20) {
-        s[3] ^= GET_U64(k + 4);
-        s[4] ^= GET_U64(k + 12);
+        s[3] ^= load_u64(k + 4);
+        s[4] ^= load_u64(k + 12);
     } else {
-        s[3] ^= GET_U64(k);
-        s[4] ^= GET_U64(k + 8);
+        s[3] ^= load_u64(k);
+        s[4] ^= load_u64(k + 8);
     }
 
     // Constant-time tag comparison
-    uint64_t t3 = GET_U64(c + clen_without_tag);
-    uint64_t t4 = GET_U64(c + clen_without_tag + 8);
+    uint64_t t3 = load_u64(c_orig + mlen);
+    uint64_t t4 = load_u64(c_orig + mlen + 8);
     if (((s[3] ^ t3) | (s[4] ^ t4)) != 0) {
         // Mismatch: clear the plaintext buffer to prevent using invalid data
-        memset(m - mlen, 0, mlen);
+        memset(m_orig, 0, mlen);
         return -1;
     }
 

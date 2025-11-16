@@ -14,9 +14,9 @@
 #include "include/ascon.h"
 
 // The default number of iterations for smaller messages
-#define DEFAULT_ITERATIONS 10000
+#define DEFAULT_ITERATIONS 4000
 // The number of iterations for larger messages
-#define LARGE_MSG_ITERATIONS 1000
+#define LARGE_MSG_ITERATIONS 100
 // The message size threshold to switch to fewer iterations
 #define LARGE_MSG_THRESHOLD 65536 // 64 KB
 
