@@ -1,0 +1,8 @@
+.vscode
+.vs
+*.o
+benchmark.exe
+benchmark_results.csv
+LICENSE
+README.md
+Proposal_Major_Project.pdf
