@@ -212,3 +212,19 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 [4] Intel. Intel Advanced Encryption Standard Instructions (AES-NI). Intel Developer Zone.
 
 [5] Patterson, David A., and Hennessy, John L. Computer Architecture: A Quantitative Approach. Morgan Kaufmann. 2017.
+
+
+---
+
+## 📦 Additional Files
+
+A compressed archive named **`RESULTS.zip`** is included separately with this submission.  
+It contains all raw and processed benchmark outputs, including:
+
+* Full CSV datasets for each optimization level  
+* Architecture-specific performance logs  
+* Generated plots and figures  
+* Intermediate files used for the final analysis  
+
+Please extract `RESULTS.zip` to access the complete set of performance results referenced in the report.
+
